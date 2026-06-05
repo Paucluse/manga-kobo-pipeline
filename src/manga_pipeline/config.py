@@ -39,9 +39,9 @@ class KoboConfig(BaseModel):
 class MetadataConfig(BaseModel):
     """Metadata defaults for imported manga."""
 
-    default_language: str = "jpn"
+    default_language: str = "zho"
     confidence_auto_accept: float = 0.85
-    default_tags: list[str] = Field(default_factory=lambda: ["manga", "japanese", "kobo-sync"])
+    default_tags: list[str] = Field(default_factory=lambda: ["manga", "chinese-translation", "kobo-sync"])
 
 
 class CommandsConfig(BaseModel):

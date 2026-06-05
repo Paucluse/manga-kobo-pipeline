@@ -35,8 +35,8 @@ class CalibreMetadata:
     authors: str = ""
     series: str = ""
     series_index: str = ""
-    languages: str = "jpn"
-    tags: str = "manga,japanese,kobo-sync"
+    languages: str = "zho"
+    tags: str = "manga,chinese-translation,kobo-sync"
 
 
 def build_calibredb_add_command(

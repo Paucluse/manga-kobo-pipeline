@@ -79,6 +79,27 @@ class TestVolumePatterns:
         result = parse_filename("oneshot_manga.cbz")
         assert result.volume == ""
 
+    def test_chinese_juan_pattern(self) -> None:
+        """第XX卷 Chinese volume pattern."""
+        result = parse_filename("进击的巨人 第01卷.cbz")
+        assert result.volume == "1"
+        assert result.title == "进击的巨人"
+
+    def test_chinese_juan_three_digits(self) -> None:
+        """第001卷 Chinese three-digit volume."""
+        result = parse_filename("海贼王 第100卷.cbz")
+        assert result.volume == "100"
+        assert result.title == "海贼王"
+
+    def test_chinese_juan_with_author(self) -> None:
+        """[Author] Title 第XX卷 Chinese pattern with author."""
+        result = parse_filename("[尾田栄一郎] 海贼王 第01卷.cbz")
+        assert result.author == "尾田栄一郎"
+        assert result.title == "海贼王"
+        assert result.volume == "1"
+        assert result.confidence >= 0.85
+
+
 
 class TestSpecExamples:
     """Test all examples from the user's specification."""

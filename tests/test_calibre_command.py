@@ -21,8 +21,8 @@ class TestBuildCalibredbCommand:
             authors="桜場コハル",
             series="みなみけ",
             series_index="1",
-            languages="jpn",
-            tags="manga,japanese,kobo-sync",
+            languages="zho",
+            tags="manga,chinese-translation,kobo-sync",
         )
         cmd = build_calibredb_add_command(
             file_path=Path("/kepub/manga.epub"),

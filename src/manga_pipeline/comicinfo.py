@@ -18,7 +18,7 @@ def generate_comicinfo_xml(
     series: str = "",
     number: str = "",
     writer: str = "",
-    language_iso: str = "ja",
+    language_iso: str = "zh",
     manga: bool = True,
     tags: list[str] | None = None,
 ) -> str:
@@ -70,7 +70,7 @@ def write_comicinfo_to_cbz(
     series: str = "",
     number: str = "",
     writer: str = "",
-    language_iso: str = "ja",
+    language_iso: str = "zh",
     manga: bool = True,
     tags: list[str] | None = None,
 ) -> None:

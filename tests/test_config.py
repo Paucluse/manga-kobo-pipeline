@@ -36,9 +36,9 @@ class TestPipelineConfigDefaults:
         assert cfg.kobo.format == "EPUB"
 
     def test_default_metadata(self) -> None:
-        """Default metadata should have Japanese language and manga tags."""
+        """Default metadata should have Chinese language and manga tags."""
         cfg = PipelineConfig()
-        assert cfg.metadata.default_language == "jpn"
+        assert cfg.metadata.default_language == "zho"
         assert cfg.metadata.confidence_auto_accept == 0.85
         assert "manga" in cfg.metadata.default_tags
         assert "kobo-sync" in cfg.metadata.default_tags
@@ -147,9 +147,9 @@ class TestLoadConfigFromYaml:
                 "high_quality": True,
             },
             "metadata": {
-                "default_language": "jpn",
+                "default_language": "zho",
                 "confidence_auto_accept": 0.9,
-                "default_tags": ["manga", "japanese"],
+                "default_tags": ["manga", "chinese-translation"],
             },
             "commands": {
                 "kcc": "/usr/local/bin/kcc-c2e",

@@ -161,7 +161,7 @@ class TestComicInfo:
             series="みなみけ",
             number="1",
             writer="桜場コハル",
-            language_iso="ja",
+            language_iso="zh",
             manga=True,
             tags=["manga", "slice-of-life"],
         )
@@ -170,7 +170,7 @@ class TestComicInfo:
         assert "<Series>みなみけ</Series>" in xml
         assert "<Number>1</Number>" in xml
         assert "<Writer>桜場コハル</Writer>" in xml
-        assert "<LanguageISO>ja</LanguageISO>" in xml
+        assert "<LanguageISO>zh</LanguageISO>" in xml
         assert "<Manga>YesAndRightToLeft</Manga>" in xml
         assert "<Tags>manga,slice-of-life</Tags>" in xml
 

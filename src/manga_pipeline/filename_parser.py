@@ -1,6 +1,6 @@
 """Manga filename parser.
 
-Parses Japanese manga filenames to extract:
+Parses manga filenames (Chinese-translated Japanese manga) to extract:
 - title / series name
 - author
 - volume number
@@ -8,12 +8,15 @@ Parses Japanese manga filenames to extract:
 
 Supports patterns like:
     [桜場コハル] みなみけ 第01巻.cbz
-    みなみけ 第01巻.zip
+    [尾田栄一郎] 海贼王 第01卷.cbz
+    进击的巨人 第01卷.zip
     みなみけ v01.cbz
     [author] title vol.01.cbz
     ダンジョン飯 01.cbz
+    一拳超人 01.cbz
     よつばと! 第001巻.cbz
 """
+
 
 from __future__ import annotations
 
@@ -53,8 +56,10 @@ RE_AUTHOR_BRACKET = re.compile(
 
 # Volume patterns (ordered by specificity)
 VOLUME_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    # 第01巻, 第001巻
+    # 第01巻, 第001巻 (Japanese)
     (re.compile(r"第(\d+)巻"), "kan"),
+    # 第01卷, 第001卷 (Chinese)
+    (re.compile(r"第(\d+)卷"), "juan"),
     # v01, v001
     (re.compile(r"v\.?(\d+)", re.IGNORECASE), "v"),
     # vol.01, vol 01, Vol.01
