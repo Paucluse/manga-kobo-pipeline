@@ -1,0 +1,149 @@
+"""Manga filename parser.
+
+Parses Japanese manga filenames to extract:
+- title / series name
+- author
+- volume number
+- confidence score
+
+Supports patterns like:
+    [桜場コハル] みなみけ 第01巻.cbz
+    みなみけ 第01巻.zip
+    みなみけ v01.cbz
+    [author] title vol.01.cbz
+    ダンジョン飯 01.cbz
+    よつばと! 第001巻.cbz
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+
+@dataclass
+class ParseResult:
+    """Result of parsing a manga filename."""
+
+    title: str = ""
+    author: str = ""
+    series: str = ""
+    volume: str = ""
+    confidence: float = 0.0
+
+    @property
+    def display(self) -> str:
+        """Human-readable summary."""
+        parts = []
+        if self.author:
+            parts.append(f"[{self.author}]")
+        if self.title:
+            parts.append(self.title)
+        if self.volume:
+            parts.append(f"v{self.volume}")
+        return " ".join(parts) if parts else "(unparsed)"
+
+
+# --- Regex patterns ---
+
+# Author in square brackets: [作者名]
+RE_AUTHOR_BRACKET = re.compile(
+    r"^\[([^\]]+)\]\s*"
+)
+
+# Volume patterns (ordered by specificity)
+VOLUME_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # 第01巻, 第001巻
+    (re.compile(r"第(\d+)巻"), "kan"),
+    # v01, v001
+    (re.compile(r"v\.?(\d+)", re.IGNORECASE), "v"),
+    # vol.01, vol 01, Vol.01
+    (re.compile(r"vol\.?\s*(\d+)", re.IGNORECASE), "vol"),
+    # Trailing number: title 01.cbz, title 001.cbz
+    (re.compile(r"\s(\d{1,3})$"), "bare"),
+]
+
+
+def parse_filename(filename: str) -> ParseResult:
+    """Parse a manga filename to extract metadata.
+
+    Args:
+        filename: Filename string (with or without extension).
+
+    Returns:
+        ParseResult with extracted fields and confidence score.
+    """
+    result = ParseResult()
+    confidence_parts: list[float] = []
+
+    # Remove file extension
+    name = _strip_extension(filename)
+
+    # Clean up common artifacts
+    name = name.strip()
+
+    # --- Extract author from [brackets] ---
+    author_match = RE_AUTHOR_BRACKET.match(name)
+    if author_match:
+        result.author = author_match.group(1).strip()
+        name = name[author_match.end():].strip()
+        confidence_parts.append(0.3)
+
+    # --- Extract volume number ---
+    volume, _vol_pattern, name_after_vol = _extract_volume(name)
+    if volume:
+        result.volume = volume
+        name = name_after_vol
+        confidence_parts.append(0.3)
+
+    # --- Title is what remains ---
+    title = name.strip()
+    # Clean trailing/leading separators
+    title = re.sub(r"[\s_\-]+$", "", title)
+    title = re.sub(r"^[\s_\-]+", "", title)
+
+    if title:
+        result.title = title
+        result.series = title  # For manga, series = title
+        confidence_parts.append(0.3)
+
+    # --- Calculate confidence ---
+    if confidence_parts:
+        result.confidence = min(sum(confidence_parts) + 0.1, 1.0)
+    else:
+        result.confidence = 0.0
+
+    return result
+
+
+def _strip_extension(filename: str) -> str:
+    """Remove manga file extensions."""
+    extensions = [
+        ".cbz", ".cbr", ".zip", ".rar", ".7z",
+        ".epub", ".kepub", ".kepub.epub",
+    ]
+    lower = filename.lower()
+    for ext in sorted(extensions, key=len, reverse=True):
+        if lower.endswith(ext):
+            return filename[: len(filename) - len(ext)]
+    return filename
+
+
+def _extract_volume(
+    name: str,
+) -> tuple[str, str, str]:
+    """Extract volume number from name string.
+
+    Returns:
+        Tuple of (volume_number, pattern_type, remaining_name).
+        If no volume found, returns ("", "", original_name).
+    """
+    for pattern, ptype in VOLUME_PATTERNS:
+        match = pattern.search(name)
+        if match:
+            vol_num = match.group(1).lstrip("0") or "0"
+            # Remove the volume part from the name
+            remaining = name[: match.start()] + name[match.end():]
+            return vol_num, ptype, remaining
+
+    return "", "", name

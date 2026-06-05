@@ -1,0 +1,46 @@
+# manga-kobo-pipeline 配置文件
+# 复制为 config.yaml 并根据环境修改
+
+# 数据目录路径（Docker 环境下通常挂载到 /data）
+paths:
+  inbox: /data/inbox
+  processing: /data/processing
+  archive_cbz: /data/archive_cbz
+  kepub_ready: /data/kepub_ready
+  calibre_library: /data/calibre-library
+  state: /data/state
+  manual_review: /data/manual-review
+  logs: /data/logs
+
+# Kobo 设备和 KCC 转换参数
+kobo:
+  profile: KoS            # KCC profile: KoS = Kobo Sage
+  format: EPUB             # 输出格式
+  manga_style: true        # 日漫模式（右→左）
+  high_quality: true       # 高质量转换
+
+# 元数据默认值
+metadata:
+  default_language: jpn    # 日语
+  confidence_auto_accept: 0.85  # 低于此阈值进入人工确认
+  default_tags:
+    - manga
+    - japanese
+    - kobo-sync
+
+# 外部命令路径
+commands:
+  kcc: kcc-c2e             # KCC 命令行工具
+  calibredb: calibredb     # Calibre 数据库工具
+
+# 处理参数
+processing:
+  stable_check_seconds: 30   # 文件稳定检查总时长（秒）
+  stable_check_interval: 5   # 检查间隔（秒）
+  enable_delete_original: false  # 是否删除原始文件（默认关闭）
+  max_retries: 3             # 最大重试次数
+
+# 日志
+logging:
+  level: INFO                # DEBUG / INFO / WARNING / ERROR
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
