@@ -1,12 +1,13 @@
 services:
+  # ── 漫画处理管线 ──────────────────────────────────────────
   manga-pipeline:
     build: .
     container_name: manga-pipeline
     restart: unless-stopped
     volumes:
-      # 配置文件
+      # 配置文件（只读挂载）
       - ./config.yaml:/app/config.yaml:ro
-      # 数据目录 - 修改 DATA_ROOT 或直接改路径
+      # 数据目录 —— 修改 .env 中的 DATA_ROOT 可统一切换路径
       - ${DATA_ROOT:-/srv/ebooks}/inbox:/data/inbox
       - ${DATA_ROOT:-/srv/ebooks}/processing:/data/processing
       - ${DATA_ROOT:-/srv/ebooks}/archive_cbz:/data/archive_cbz
@@ -18,20 +19,22 @@ services:
     environment:
       - MANGA_PIPELINE_CONFIG=/app/config.yaml
       - MANGA_PIPELINE_LOG_LEVEL=${MANGA_PIPELINE_LOG_LEVEL:-INFO}
-    # 默认 run 模式（持续监听），可覆盖为其他命令
-    # command: ["scan"]  # 取消注释可改为单次扫描
+    # 默认 run 模式（持续监听 inbox），可覆盖为其他命令：
+    # command: ["process"]   # 单次处理
+    # command: ["scan"]      # 仅扫描
 
-  # Calibre-Web（可选，取消注释启用）
-  # calibre-web:
-  #   image: lscr.io/linuxserver/calibre-web:latest
-  #   container_name: calibre-web
-  #   restart: unless-stopped
-  #   environment:
-  #     - PUID=1000
-  #     - PGID=1000
-  #     - TZ=Asia/Tokyo
-  #   volumes:
-  #     - ${DATA_ROOT:-/srv/ebooks}/calibre-web-config:/config
-  #     - ${DATA_ROOT:-/srv/ebooks}/calibre-library:/books
-  #   ports:
-  #     - "${CALIBRE_WEB_PORT:-8083}:8083"
+  # ── Calibre-Web（网页书库 + Kobo 同步）────────────────────
+  calibre-web:
+    image: lscr.io/linuxserver/calibre-web:latest
+    container_name: calibre-web
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Shanghai
+      - DOCKER_MODS=linuxserver/mods:universal-calibre
+    volumes:
+      - ${DATA_ROOT:-/srv/ebooks}/calibre-web-config:/config
+      - ${DATA_ROOT:-/srv/ebooks}/calibre-library:/books
+    ports:
+      - "${CALIBRE_WEB_PORT:-8083}:8083"
