@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir kcc
 WORKDIR /app
 
 # Copy entire project
-COPY pyproject.toml .
+COPY pyproject.toml README.md ./
 COPY src/ src/
 
 # Install with all extras (includes py7zr for 7z support)
