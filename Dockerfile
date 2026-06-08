@@ -4,13 +4,12 @@ FROM python:3.12-slim AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Archive tools
     p7zip-full \
-    unrar \
+    unrar-free \
     # Calibre CLI (calibredb)
     calibre \
     # KCC dependencies
-    libgl1-mesa-glx \
+    libgl1 \
     libegl1 \
-    # General
     && rm -rf /var/lib/apt/lists/*
 
 # Install KCC (Kindle Comic Converter)
