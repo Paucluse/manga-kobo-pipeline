@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install KCC (Kindle Comic Converter)
-RUN pip install --no-cache-dir kcc
+RUN pip install --no-cache-dir KindleComicConverter
 
 # Create app directory
 WORKDIR /app
