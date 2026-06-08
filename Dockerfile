@@ -10,10 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # KCC dependencies
     libgl1 \
     libegl1 \
+    # Git needed for pip install from GitHub
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install KCC (Kindle Comic Converter)
-RUN pip install --no-cache-dir KindleComicConverter
+# Install KCC (Kindle Comic Converter) from GitHub
+RUN pip install --no-cache-dir git+https://github.com/ciromattia/kcc.git
 
 # Create app directory
 WORKDIR /app
