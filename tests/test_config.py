@@ -39,7 +39,7 @@ class TestPipelineConfigDefaults:
         """Default metadata should have Chinese language and manga tags."""
         cfg = PipelineConfig()
         assert cfg.metadata.default_language == "zho"
-        assert cfg.metadata.confidence_auto_accept == 0.85
+        assert cfg.metadata.confidence_auto_accept == 0.4
         assert "manga" in cfg.metadata.default_tags
         assert "kobo-sync" in cfg.metadata.default_tags
 

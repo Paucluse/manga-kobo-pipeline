@@ -22,7 +22,7 @@ kobo:
 # 元数据默认值
 metadata:
   default_language: zho    # 中文（中文翻译版日漫）
-  confidence_auto_accept: 0.85  # 低于此阈值进入人工确认
+  confidence_auto_accept: 0.4  # 低于此阈值进入人工确认
   default_tags:
     - manga
     - chinese-translation

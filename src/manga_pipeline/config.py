@@ -40,7 +40,7 @@ class MetadataConfig(BaseModel):
     """Metadata defaults for imported manga."""
 
     default_language: str = "zho"
-    confidence_auto_accept: float = 0.85
+    confidence_auto_accept: float = 0.4
     default_tags: list[str] = Field(default_factory=lambda: ["manga", "chinese-translation", "kobo-sync"])
 
 
