@@ -33,7 +33,7 @@ class TestPipelineConfigDefaults:
         assert cfg.kobo.profile == "KoS"
         assert cfg.kobo.manga_style is True
         assert cfg.kobo.high_quality is True
-        assert cfg.kobo.format == "EPUB"
+        assert cfg.kobo.format == "KEPUB"
 
     def test_default_metadata(self) -> None:
         """Default metadata should have Chinese language and manga tags."""
@@ -52,7 +52,8 @@ class TestPipelineConfigDefaults:
     def test_default_processing(self) -> None:
         """Default processing should have safe defaults."""
         cfg = PipelineConfig()
-        assert cfg.processing.enable_delete_original is False
+        assert cfg.processing.delete_inbox_after_archive is True
+        assert cfg.processing.cleanup_after_import is True
         assert cfg.processing.max_retries == 3
         assert cfg.processing.stable_check_seconds == 30
 
@@ -104,7 +105,7 @@ class TestLoadConfigFromYaml:
         config_data = {
             "processing": {
                 "max_retries": 5,
-                "enable_delete_original": True,
+                "delete_inbox_after_archive": False,
             }
         }
         config_file = tmp_path / "config.yaml"
@@ -112,7 +113,7 @@ class TestLoadConfigFromYaml:
 
         cfg = load_config(config_file)
         assert cfg.processing.max_retries == 5
-        assert cfg.processing.enable_delete_original is True
+        assert cfg.processing.delete_inbox_after_archive is False
         # Other sections untouched
         assert cfg.paths.inbox == Path("/data/inbox")
 
@@ -158,7 +159,8 @@ class TestLoadConfigFromYaml:
             "processing": {
                 "stable_check_seconds": 60,
                 "stable_check_interval": 10,
-                "enable_delete_original": False,
+                "delete_inbox_after_archive": False,
+                "cleanup_after_import": False,
                 "max_retries": 5,
             },
             "logging": {

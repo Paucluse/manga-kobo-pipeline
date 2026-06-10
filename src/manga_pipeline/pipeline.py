@@ -220,6 +220,17 @@ def _step_normalize_and_archive(
             archive_path=str(archive_path),
         )
         logger.info("Archived: %s -> %s", file_path.name, archive_path.name)
+
+        # Clean up: delete original from inbox
+        if cfg.processing.delete_inbox_after_archive:
+            try:
+                file_path.unlink()
+                logger.info("Deleted inbox original: %s", file_path.name)
+            except OSError as e:
+                logger.warning(
+                    "Could not delete inbox file %s: %s", file_path.name, e
+                )
+
         return True
 
     except (ValueError, OSError, ImportError) as e:
@@ -338,6 +349,21 @@ def _step_import_calibre(
             record.file_name,
             result.book_id,
         )
+
+        # Clean up: delete converted file from kepub_ready
+        if cfg.processing.cleanup_after_import:
+            try:
+                converted_path.unlink()
+                logger.info(
+                    "Deleted converted file: %s", converted_path.name
+                )
+            except OSError as e:
+                logger.warning(
+                    "Could not delete converted file %s: %s",
+                    converted_path.name,
+                    e,
+                )
+
         return True
     else:
         db.update_status(

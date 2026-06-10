@@ -31,7 +31,7 @@ class KoboConfig(BaseModel):
     """Kobo device and KCC conversion settings."""
 
     profile: str = "KoS"
-    format: str = "EPUB"
+    format: str = "KEPUB"
     manga_style: bool = True
     high_quality: bool = True
 
@@ -56,7 +56,8 @@ class ProcessingConfig(BaseModel):
 
     stable_check_seconds: int = 30
     stable_check_interval: int = 5
-    enable_delete_original: bool = False
+    delete_inbox_after_archive: bool = True
+    cleanup_after_import: bool = True
     max_retries: int = 3
 
 

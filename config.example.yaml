@@ -15,7 +15,7 @@ paths:
 # Kobo 设备和 KCC 转换参数
 kobo:
   profile: KoS            # KCC profile: KoS = Kobo Sage
-  format: EPUB             # 输出格式
+  format: KEPUB            # 输出格式（KEPUB 比 EPUB 在 Kobo 上效果更好）
   manga_style: true        # 日漫模式（右→左）
   high_quality: true       # 高质量转换
 
@@ -37,7 +37,8 @@ commands:
 processing:
   stable_check_seconds: 30   # 文件稳定检查总时长（秒）
   stable_check_interval: 5   # 检查间隔（秒）
-  enable_delete_original: false  # 是否删除原始文件（默认关闭）
+  delete_inbox_after_archive: true  # 归档成功后删除 inbox 原文件
+  cleanup_after_import: true        # Calibre 导入成功后删除 kepub_ready 中的转换文件
   max_retries: 3             # 最大重试次数
 
 # 日志

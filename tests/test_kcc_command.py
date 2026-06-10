@@ -22,7 +22,7 @@ class TestBuildKccCommand:
         assert "-m" in cmd  # manga style
         assert "-q" in cmd  # high quality
         assert "-f" in cmd
-        assert cmd[cmd.index("-f") + 1] == "EPUB"
+        assert cmd[cmd.index("-f") + 1] == "KEPUB"
         assert "-o" in cmd
         assert cmd[-1] == str(Path("/inbox/manga.cbz"))
 
