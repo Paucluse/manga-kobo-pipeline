@@ -319,6 +319,13 @@ def _step_import_calibre(
         )
         return False
 
+    # Rename .kepub.epub to .kepub so Calibre registers it as KEPUB format natively
+    if converted_path.name.endswith(".kepub.epub"):
+        new_path = converted_path.with_name(converted_path.name.replace(".kepub.epub", ".kepub"))
+        converted_path = converted_path.rename(new_path)
+        # Update DB with new path so cleanup finds it later
+        db.update_status(record_id, ProcessingStatus.CONVERTED, converted_path=str(converted_path))
+
     # Build metadata for Calibre
     meta = CalibreMetadata(
         title=record.title or record.file_name,
