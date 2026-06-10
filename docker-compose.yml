@@ -16,9 +16,11 @@ services:
       - ${DATA_ROOT:-/srv/ebooks}/pipeline-state:/data/state
       - ${DATA_ROOT:-/srv/ebooks}/manual-review:/data/manual-review
       - ${DATA_ROOT:-/srv/ebooks}/logs:/data/logs
+    user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       - MANGA_PIPELINE_CONFIG=/app/config.yaml
       - MANGA_PIPELINE_LOG_LEVEL=${MANGA_PIPELINE_LOG_LEVEL:-INFO}
+      - HOME=/tmp
     # 默认 run 模式（持续监听 inbox），可覆盖为其他命令：
     # command: ["process"]   # 单次处理
     # command: ["scan"]      # 仅扫描
