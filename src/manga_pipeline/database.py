@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS manga_records (
     author TEXT DEFAULT '',
     series TEXT DEFAULT '',
     volume TEXT DEFAULT '',
+    publisher TEXT DEFAULT '',
     confidence REAL DEFAULT 0.0,
     archive_path TEXT DEFAULT '',
     converted_path TEXT DEFAULT '',
@@ -56,6 +57,11 @@ class Database:
     def _create_tables(self) -> None:
         """Create tables if they don't exist."""
         self.conn.execute(CREATE_TABLE_SQL)
+        # Migrate schema if needed
+        try:
+            self.conn.execute("ALTER TABLE manga_records ADD COLUMN publisher TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass # Column already exists
         self.conn.commit()
 
     def close(self) -> None:
@@ -78,10 +84,10 @@ class Database:
             """
             INSERT INTO manga_records (
                 original_path, file_name, file_hash, current_status,
-                title, author, series, volume, confidence,
+                title, author, series, volume, publisher, confidence,
                 archive_path, converted_path, calibre_book_id,
                 error_message, retry_count, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.original_path,
@@ -92,6 +98,7 @@ class Database:
                 record.author,
                 record.series,
                 record.volume,
+                record.publisher,
                 record.confidence,
                 record.archive_path,
                 record.converted_path,
@@ -205,6 +212,7 @@ class Database:
             author=row["author"],
             series=row["series"],
             volume=row["volume"],
+            publisher=row["publisher"],
             confidence=row["confidence"],
             archive_path=row["archive_path"],
             converted_path=row["converted_path"],

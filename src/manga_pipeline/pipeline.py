@@ -159,6 +159,7 @@ def _step_parse_metadata(
         author=parsed.author,
         series=parsed.series,
         volume=parsed.volume,
+        publisher=parsed.publisher,
         confidence=str(parsed.confidence),
     )
     return True
@@ -299,6 +300,7 @@ def _step_import_calibre(
         authors=record.author,
         series=record.series,
         series_index=record.volume,
+        publisher=record.publisher,
         languages=cfg.metadata.default_language,
         tags=",".join(cfg.metadata.default_tags),
     )

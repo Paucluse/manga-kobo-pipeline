@@ -32,6 +32,7 @@ class ParseResult:
     author: str = ""
     series: str = ""
     volume: str = ""
+    publisher: str = ""
     confidence: float = 0.0
 
     @property
@@ -87,12 +88,14 @@ def parse_filename(filename: str) -> ParseResult:
     # Clean up common artifacts
     name = name.strip()
 
-    # --- Extract author from [brackets] ---
-    author_match = RE_AUTHOR_BRACKET.match(name)
-    if author_match:
-        result.author = author_match.group(1).strip()
-        name = name[author_match.end():].strip()
-        confidence_parts.append(0.3)
+    # --- Extract ALL bracket groups at the beginning ---
+    brackets = []
+    while True:
+        m = RE_AUTHOR_BRACKET.match(name)
+        if not m:
+            break
+        brackets.append(m.group(1).strip())
+        name = name[m.end():].strip()
 
     # --- Extract volume number ---
     volume, _vol_pattern, name_after_vol = _extract_volume(name)
@@ -101,16 +104,42 @@ def parse_filename(filename: str) -> ParseResult:
         name = name_after_vol
         confidence_parts.append(0.3)
 
-    # --- Title is what remains ---
-    title = name.strip()
-    # Clean trailing/leading separators
-    title = re.sub(r"[\s_\-]+$", "", title)
-    title = re.sub(r"^[\s_\-]+", "", title)
+    # --- Title candidate is what remains ---
+    title_candidate = name.strip()
+    title_candidate = re.sub(r"[\s_\-]+$", "", title_candidate)
+    title_candidate = re.sub(r"^[\s_\-]+", "", title_candidate)
 
-    if title:
-        result.title = title
-        result.series = title  # For manga, series = title
+    # --- Heuristics to assign Title, Author, Publisher ---
+    if not title_candidate:
+        # Title was inside the brackets! e.g., [Title][Author][Publisher] vol1.cbz
+        if len(brackets) == 3:
+            result.title = brackets[0]
+            result.author = brackets[1]
+            result.publisher = brackets[2]
+            confidence_parts.append(0.3)
+            confidence_parts.append(0.2)
+        elif len(brackets) == 2:
+            result.title = brackets[0]
+            result.author = brackets[1]
+            confidence_parts.append(0.3)
+        elif len(brackets) == 1:
+            result.title = brackets[0]
+            confidence_parts.append(0.2)
+    else:
+        # Title is outside the brackets! e.g., [Group][Author] Title vol1.cbz
+        result.title = title_candidate
         confidence_parts.append(0.3)
+        if len(brackets) == 1:
+            result.author = brackets[0]
+            confidence_parts.append(0.2)
+        elif len(brackets) >= 2:
+            # Usually [Group][Author] Title
+            result.author = brackets[1]
+            result.publisher = brackets[0] # Using publisher field to hold Group
+            confidence_parts.append(0.2)
+
+    if result.title:
+        result.series = result.title  # For manga, series = title
 
     # --- Calculate confidence ---
     if confidence_parts:

@@ -35,6 +35,7 @@ class CalibreMetadata:
     authors: str = ""
     series: str = ""
     series_index: str = ""
+    publisher: str = ""
     languages: str = "zho"
     tags: str = "manga,chinese-translation,kobo-sync"
 
@@ -70,6 +71,8 @@ def build_calibredb_add_command(
         cmd.extend(["--series", metadata.series])
     if metadata.series_index:
         cmd.extend(["--series-index", metadata.series_index])
+    if metadata.publisher:
+        cmd.extend(["--publisher", metadata.publisher])
     if metadata.languages:
         cmd.extend(["--languages", metadata.languages])
     if metadata.tags:

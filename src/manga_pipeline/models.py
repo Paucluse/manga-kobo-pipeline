@@ -40,6 +40,7 @@ class MangaRecord:
     author: str = ""
     series: str = ""
     volume: str = ""
+    publisher: str = ""
     confidence: float = 0.0
     archive_path: str = ""
     converted_path: str = ""
