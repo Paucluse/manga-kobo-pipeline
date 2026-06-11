@@ -106,3 +106,46 @@ def check_file_stable_quick(
         return size1 == size2
     except OSError:
         return False
+
+
+def check_files_stable_batch(
+    file_paths: list[Path],
+    check_interval: int = 2,
+) -> list[Path]:
+    """Check stability for a batch of files concurrently.
+
+    Args:
+        file_paths: List of paths to check.
+        check_interval: Seconds between two size checks.
+
+    Returns:
+        List of paths that are stable.
+    """
+    if not file_paths:
+        return []
+
+    initial_sizes = {}
+    for path in file_paths:
+        if path.is_file():
+            try:
+                size = path.stat().st_size
+                if size > 0:
+                    initial_sizes[path] = size
+            except OSError:
+                pass
+
+    if not initial_sizes:
+        return []
+
+    time.sleep(check_interval)
+
+    stable_paths = []
+    for path, initial_size in initial_sizes.items():
+        if path.is_file():
+            try:
+                if path.stat().st_size == initial_size:
+                    stable_paths.append(path)
+            except OSError:
+                pass
+
+    return stable_paths

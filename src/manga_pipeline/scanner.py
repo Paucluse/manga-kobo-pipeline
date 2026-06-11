@@ -16,6 +16,7 @@ from manga_pipeline.models import (
     MangaRecord,
     ProcessingStatus,
 )
+from manga_pipeline.stability import check_files_stable_batch
 from manga_pipeline.utils import compute_file_hash
 
 logger = get_logger(__name__)
@@ -40,26 +41,34 @@ def scan_inbox(inbox_dir: Path, db: Database) -> list[MangaRecord]:
         return []
 
     discovered: list[MangaRecord] = []
-
+    
+    # 1. Find all potential new files
+    potential_files = []
     for file_path in sorted(inbox_dir.iterdir()):
         if file_path.is_dir():
-            # TODO: Support image directories in future
             logger.debug("Skipping directory: %s", file_path.name)
             continue
-
         if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            logger.debug(
-                "Skipping unsupported file type: %s", file_path.name
-            )
+            logger.debug("Skipping unsupported file type: %s", file_path.name)
             continue
+        potential_files.append(file_path)
 
-        # Compute hash for idempotency
+    # 2. Batch check stability (skips files actively being written)
+    stable_files = check_files_stable_batch(potential_files)
+    if len(stable_files) < len(potential_files):
+        logger.debug(
+            "Found %d files, but only %d are stable. Waiting for the rest.",
+            len(potential_files),
+            len(stable_files),
+        )
+
+    # 3. Process only stable files
+    for file_path in stable_files:
+        # Compute hash for idempotency ONLY when stable
         try:
             file_hash = compute_file_hash(file_path)
         except OSError as e:
-            logger.warning(
-                "Could not read file %s: %s", file_path.name, e
-            )
+            logger.warning("Could not read file %s: %s", file_path.name, e)
             continue
 
         # Check if already in database
@@ -72,12 +81,12 @@ def scan_inbox(inbox_dir: Path, db: Database) -> list[MangaRecord]:
             )
             continue
 
-        # Create new record
+        # Create new record. Skip DISCOVERED and WAITING_STABLE since we just proved stability
         record = MangaRecord(
             original_path=str(file_path),
             file_name=file_path.name,
             file_hash=file_hash,
-            current_status=ProcessingStatus.DISCOVERED,
+            current_status=ProcessingStatus.WAITING_STABLE, # Will be picked up immediately
         )
 
         try:
@@ -85,22 +94,20 @@ def scan_inbox(inbox_dir: Path, db: Database) -> list[MangaRecord]:
             record.id = record_id
             discovered.append(record)
             logger.info(
-                "Discovered: %s (id=%d, hash=%s...)",
+                "Discovered and stable: %s (id=%d, hash=%s...)",
                 file_path.name,
                 record_id,
                 file_hash[:12],
             )
         except sqlite3.IntegrityError:
             # Race condition: another process inserted the same hash
-            logger.debug(
-                "Hash already exists (race condition): %s",
-                file_path.name,
-            )
+            logger.debug("Hash already exists (race condition): %s", file_path.name)
             continue
 
-    logger.info(
-        "Scan complete: %d new files discovered in %s",
-        len(discovered),
-        inbox_dir,
-    )
+    if discovered:
+        logger.info(
+            "Scan complete: %d new stable files discovered in %s",
+            len(discovered),
+            inbox_dir,
+        )
     return discovered
