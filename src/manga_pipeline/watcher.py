@@ -94,11 +94,9 @@ def watch_inbox(cfg: PipelineConfig, db: Database) -> None:
                 discovered = scan_inbox(inbox_dir, db)
                 if discovered:
                     logger.info(
-                        "Discovered %d new file(s). Waiting %ds for stability...",
-                        len(discovered),
-                        cfg.processing.stable_check_seconds
+                        "Discovered and verified %d new stable file(s). Starting processing immediately.",
+                        len(discovered)
                     )
-                    time.sleep(cfg.processing.stable_check_seconds)
 
                 # 2. Process pending tasks
                 completed = process_all_pending(cfg, db)
