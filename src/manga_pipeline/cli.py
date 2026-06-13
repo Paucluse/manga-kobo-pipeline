@@ -165,6 +165,7 @@ def scan(
     ),
 ) -> None:
     """Scan inbox directory for new manga files."""
+    from manga_pipeline.calibre import calibre_book_exists
     from manga_pipeline.database import Database
     from manga_pipeline.scanner import scan_inbox
 
@@ -172,7 +173,16 @@ def scan(
     db = Database(cfg.paths.state / "pipeline.db")
 
     try:
-        discovered = scan_inbox(cfg.paths.inbox, db)
+        discovered = scan_inbox(
+            cfg.paths.inbox,
+            db,
+            stability_check_interval=cfg.processing.stable_check_interval,
+            calibre_record_exists=lambda record: calibre_book_exists(
+                record.calibre_book_id,
+                cfg.paths.calibre_library,
+                cfg.commands.calibredb,
+            ),
+        )
         if discovered:
             console.print(
                 f"\n[green]Discovered {len(discovered)} new file(s)[/green]"
@@ -192,6 +202,7 @@ def process(
     ),
 ) -> None:
     """Process pending manga files through the pipeline."""
+    from manga_pipeline.calibre import calibre_book_exists
     from manga_pipeline.database import Database
     from manga_pipeline.pipeline import process_all_pending
     from manga_pipeline.scanner import scan_inbox
@@ -201,7 +212,16 @@ def process(
 
     try:
         # First scan for new files
-        discovered = scan_inbox(cfg.paths.inbox, db)
+        discovered = scan_inbox(
+            cfg.paths.inbox,
+            db,
+            stability_check_interval=cfg.processing.stable_check_interval,
+            calibre_record_exists=lambda record: calibre_book_exists(
+                record.calibre_book_id,
+                cfg.paths.calibre_library,
+                cfg.commands.calibredb,
+            ),
+        )
         if discovered:
             console.print(
                 f"[green]Discovered {len(discovered)} new file(s)[/green]"
@@ -287,13 +307,13 @@ def status(
 @app.command()
 def retry(
     task_id: int = typer.Option(
-        ..., "--id", help="ID of the failed task to retry"
+        ..., "--id", help="ID of the failed or review task to retry"
     ),
     config_file: Optional[Path] = typer.Option(
         None, "--config", "-c", help="Path to config.yaml"
     ),
 ) -> None:
-    """Retry a failed task by ID."""
+    """Retry a failed or review task by ID."""
     from manga_pipeline.database import Database
     from manga_pipeline.models import ProcessingStatus
 
@@ -306,18 +326,21 @@ def retry(
             console.print(f"[red]Record {task_id} not found[/red]")
             raise typer.Exit(code=1)
 
-        if record.current_status != ProcessingStatus.FAILED:
+        if record.current_status not in {
+            ProcessingStatus.FAILED,
+            ProcessingStatus.NEEDS_REVIEW,
+        }:
             console.print(
-                f"[yellow]Record {task_id} is not failed "
+                f"[yellow]Record {task_id} is not failed or in review "
                 f"(status: {record.current_status})[/yellow]"
             )
             raise typer.Exit(code=1)
 
         db.update_status(
-            task_id, ProcessingStatus.DISCOVERED, error_message=""
+            task_id, ProcessingStatus.WAITING_STABLE, error_message=""
         )
         console.print(
-            f"[green]Record {task_id} reset to discovered. "
+            f"[green]Record {task_id} reset to waiting_stable. "
             f"Run 'process' to retry.[/green]"
         )
     finally:
@@ -369,7 +392,11 @@ def dry_run(
 
     # Calibre command
     meta = CalibreMetadata(
-        title=parsed.title or p.stem,
+        title=(
+            f"{parsed.title} 卷{parsed.volume}"
+            if parsed.title and parsed.volume
+            else parsed.title or p.stem
+        ),
         authors=parsed.author,
         series=parsed.series,
         series_index=parsed.volume,
@@ -385,4 +412,3 @@ def dry_run(
     console.print("\n[bold]Calibre command:[/bold]")
     console.print(f"  {' '.join(cal_cmd)}")
     console.print()
-

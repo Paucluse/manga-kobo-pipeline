@@ -58,6 +58,11 @@ class TestVolumePatterns:
         result = parse_filename("manga vol 03.cbz")
         assert result.volume == "3"
 
+    def test_vol_underscore_pattern(self) -> None:
+        """Vol_XX pattern."""
+        result = parse_filename("manga Vol_03.cbz")
+        assert result.volume == "3"
+
     def test_bare_number(self) -> None:
         """Trailing number only."""
         result = parse_filename("ダンジョン飯 01.cbz")
@@ -193,6 +198,14 @@ class TestEdgeCases:
         """Series should be same as title for manga."""
         result = parse_filename("みなみけ 第01巻.cbz")
         assert result.series == result.title
+
+    def test_parent_directory_style_name(self) -> None:
+        """Directory metadata plus numbered child file should parse correctly."""
+        result = parse_filename("[苍蓝钢铁战舰][Ark Performance][长鸿出版社] 01.zip")
+        assert result.title == "苍蓝钢铁战舰"
+        assert result.author == "Ark Performance"
+        assert result.publisher == "长鸿出版社"
+        assert result.volume == "1"
 
 
 class TestConfidence:

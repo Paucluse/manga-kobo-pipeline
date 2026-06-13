@@ -41,7 +41,9 @@ class MetadataConfig(BaseModel):
 
     default_language: str = "zho"
     confidence_auto_accept: float = 0.4
-    default_tags: list[str] = Field(default_factory=lambda: ["manga", "chinese-translation", "kobo-sync"])
+    default_tags: list[str] = Field(
+        default_factory=lambda: ["manga", "chinese-translation", "kobo-sync"]
+    )
 
 
 class CommandsConfig(BaseModel):
@@ -56,6 +58,7 @@ class ProcessingConfig(BaseModel):
 
     stable_check_seconds: int = 30
     stable_check_interval: int = 5
+    poll_interval_seconds: int = 10
     delete_inbox_after_archive: bool = True
     cleanup_after_import: bool = True
     max_retries: int = 3

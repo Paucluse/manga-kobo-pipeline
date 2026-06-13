@@ -63,8 +63,10 @@ VOLUME_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"第(\d+)卷"), "juan"),
     # v01, v001
     (re.compile(r"v\.?(\d+)", re.IGNORECASE), "v"),
-    # vol.01, vol 01, Vol.01
-    (re.compile(r"vol\.?\s*(\d+)", re.IGNORECASE), "vol"),
+    # vol.01, vol 01, Vol_01
+    (re.compile(r"vol\.?[\s_\-]*(\d+)", re.IGNORECASE), "vol"),
+    # Standalone number after parent directory metadata: [Title][Author] 01.cbz
+    (re.compile(r"^(\d{1,3})$"), "standalone"),
     # Trailing number: title 01.cbz, title 001.cbz
     (re.compile(r"\s(\d{1,3})$"), "bare"),
 ]

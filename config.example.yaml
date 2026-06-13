@@ -37,6 +37,7 @@ commands:
 processing:
   stable_check_seconds: 30   # 文件稳定检查总时长（秒）
   stable_check_interval: 5   # 检查间隔（秒）
+  poll_interval_seconds: 10  # 监听事件丢失时的轮询兜底间隔（秒）
   delete_inbox_after_archive: true  # 归档成功后删除 inbox 原文件
   cleanup_after_import: true        # Calibre 导入成功后删除 kepub_ready 中的转换文件
   max_retries: 3             # 最大重试次数

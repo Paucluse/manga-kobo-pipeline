@@ -5,10 +5,12 @@ from pathlib import Path
 
 from manga_pipeline.comicinfo import generate_comicinfo_xml, write_comicinfo_to_cbz
 from manga_pipeline.database import Database
-from manga_pipeline.models import ProcessingStatus
+from manga_pipeline.models import MangaRecord, ProcessingStatus
 from manga_pipeline.normalizer import normalize_to_cbz
+from manga_pipeline.pipeline import _build_calibre_title
 from manga_pipeline.review import move_to_review
 from manga_pipeline.scanner import scan_inbox
+from manga_pipeline.utils import compute_file_hash
 
 
 class TestNormalizeCbz:
@@ -219,12 +221,53 @@ class TestScannerIntegration:
         (inbox / "readme.txt").write_bytes(b"not manga")
 
         db = Database(tmp_path / "state" / "test.db")
-        discovered = scan_inbox(inbox, db)
+        discovered = scan_inbox(inbox, db, stability_check_interval=0)
 
         assert len(discovered) == 2
         names = {r.file_name for r in discovered}
         assert "manga1.cbz" in names
         assert "manga2.zip" in names
+        db.close()
+
+    def test_scan_discovers_numbered_archives_inside_manga_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """A top-level manga directory can provide metadata for numbered archives."""
+        inbox = tmp_path / "inbox"
+        manga_dir = inbox / "[苍蓝钢铁战舰][Ark Performance][长鸿出版社]"
+        manga_dir.mkdir(parents=True)
+        (manga_dir / "01.zip").write_bytes(b"volume 1")
+        (manga_dir / "Vol_02.cbz").write_bytes(b"volume 2")
+
+        db = Database(tmp_path / "state" / "test.db")
+        discovered = scan_inbox(inbox, db, stability_check_interval=0)
+
+        assert len(discovered) == 2
+        assert {
+            record.file_name for record in discovered
+        } == {
+            "[苍蓝钢铁战舰][Ark Performance][长鸿出版社] 01.zip",
+            "[苍蓝钢铁战舰][Ark Performance][长鸿出版社] Vol_02.cbz",
+        }
+        assert {
+            Path(record.original_path).name for record in discovered
+        } == {"01.zip", "Vol_02.cbz"}
+        db.close()
+
+    def test_scan_uses_child_name_for_non_simple_archives_inside_manga_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-simple archive names inside directories are parsed as themselves."""
+        inbox = tmp_path / "inbox"
+        manga_dir = inbox / "[Title][Author][Publisher]"
+        manga_dir.mkdir(parents=True)
+        (manga_dir / "[Other][Writer] bonus vol1.zip").write_bytes(b"bonus")
+
+        db = Database(tmp_path / "state" / "test.db")
+        discovered = scan_inbox(inbox, db, stability_check_interval=0)
+
+        assert len(discovered) == 1
+        assert discovered[0].file_name == "[Other][Writer] bonus vol1.zip"
         db.close()
 
     def test_scan_idempotent(self, tmp_path: Path) -> None:
@@ -234,8 +277,8 @@ class TestScannerIntegration:
         (inbox / "manga.cbz").write_bytes(b"data")
 
         db = Database(tmp_path / "state" / "test.db")
-        first = scan_inbox(inbox, db)
-        second = scan_inbox(inbox, db)
+        first = scan_inbox(inbox, db, stability_check_interval=0)
+        second = scan_inbox(inbox, db, stability_check_interval=0)
 
         assert len(first) == 1
         assert len(second) == 0  # No new files
@@ -248,7 +291,7 @@ class TestScannerIntegration:
         inbox.mkdir()
 
         db = Database(tmp_path / "state" / "test.db")
-        discovered = scan_inbox(inbox, db)
+        discovered = scan_inbox(inbox, db, stability_check_interval=0)
         assert len(discovered) == 0
         db.close()
 
@@ -256,7 +299,7 @@ class TestScannerIntegration:
         """Non-existent inbox should return empty list."""
         db = Database(tmp_path / "state" / "test.db")
         discovered = scan_inbox(
-            tmp_path / "nonexistent", db
+            tmp_path / "nonexistent", db, stability_check_interval=0
         )
         assert len(discovered) == 0
         db.close()
@@ -264,15 +307,15 @@ class TestScannerIntegration:
     def test_scan_records_have_correct_status(
         self, tmp_path: Path
     ) -> None:
-        """Scanned files should have DISCOVERED status."""
+        """Scanned stable files should be queued for immediate processing."""
         inbox = tmp_path / "inbox"
         inbox.mkdir()
         (inbox / "test.cbz").write_bytes(b"test data")
 
         db = Database(tmp_path / "state" / "test.db")
-        discovered = scan_inbox(inbox, db)
+        discovered = scan_inbox(inbox, db, stability_check_interval=0)
 
-        assert discovered[0].current_status == ProcessingStatus.DISCOVERED
+        assert discovered[0].current_status == ProcessingStatus.WAITING_STABLE
         assert discovered[0].file_hash != ""
         db.close()
 
@@ -283,7 +326,133 @@ class TestScannerIntegration:
         (inbox / "test.cbz").write_bytes(b"unique content")
 
         db = Database(tmp_path / "state" / "test.db")
-        discovered = scan_inbox(inbox, db)
+        discovered = scan_inbox(inbox, db, stability_check_interval=0)
 
         assert len(discovered[0].file_hash) == 64  # SHA-256 hex
         db.close()
+
+    def test_scan_requeues_failed_duplicate(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-uploading a failed file should make it processable again."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        file_path = inbox / "retry.cbz"
+        file_path.write_bytes(b"retry content")
+
+        db = Database(tmp_path / "state" / "test.db")
+        original = scan_inbox(inbox, db, stability_check_interval=0)[0]
+        assert original.id is not None
+        db.update_status(
+            original.id,
+            ProcessingStatus.FAILED,
+            error_message="conversion failed",
+        )
+
+        discovered = scan_inbox(inbox, db, stability_check_interval=0)
+
+        assert len(discovered) == 1
+        assert discovered[0].id == original.id
+        assert discovered[0].current_status == ProcessingStatus.WAITING_STABLE
+        assert discovered[0].retry_count == 0
+        assert discovered[0].error_message == ""
+        db.close()
+
+    def test_scan_requeues_review_duplicate(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-uploading a review item should retry it after parser changes."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        file_path = inbox / "review.cbz"
+        file_path.write_bytes(b"review content")
+
+        db = Database(tmp_path / "state" / "test.db")
+        file_hash = compute_file_hash(file_path)
+        db.insert_record(
+            MangaRecord(
+                original_path="/old/review.cbz",
+                file_name="review.cbz",
+                file_hash=file_hash,
+                current_status=ProcessingStatus.NEEDS_REVIEW,
+                error_message="Low confidence",
+                retry_count=2,
+            )
+        )
+
+        discovered = scan_inbox(inbox, db, stability_check_interval=0)
+
+        assert len(discovered) == 1
+        assert discovered[0].current_status == ProcessingStatus.WAITING_STABLE
+        assert discovered[0].original_path == str(file_path)
+        assert discovered[0].retry_count == 0
+        db.close()
+
+    def test_scan_requeues_done_duplicate_when_calibre_book_is_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """A re-uploaded done file should import again if Calibre no longer has it."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        file_path = inbox / "missing.cbz"
+        file_path.write_bytes(b"missing from calibre")
+
+        db = Database(tmp_path / "state" / "test.db")
+        original = scan_inbox(inbox, db, stability_check_interval=0)[0]
+        assert original.id is not None
+        db.update_status(
+            original.id,
+            ProcessingStatus.DONE,
+            calibre_book_id="42",
+        )
+
+        discovered = scan_inbox(
+            inbox,
+            db,
+            stability_check_interval=0,
+            calibre_record_exists=lambda _record: False,
+        )
+
+        assert len(discovered) == 1
+        assert discovered[0].id == original.id
+        assert discovered[0].current_status == ProcessingStatus.WAITING_STABLE
+        assert discovered[0].calibre_book_id == ""
+        db.close()
+
+    def test_scan_skips_done_duplicate_when_calibre_book_exists(
+        self, tmp_path: Path
+    ) -> None:
+        """A re-uploaded done file is skipped only if Calibre still has it."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        file_path = inbox / "present.cbz"
+        file_path.write_bytes(b"present in calibre")
+
+        db = Database(tmp_path / "state" / "test.db")
+        original = scan_inbox(inbox, db, stability_check_interval=0)[0]
+        assert original.id is not None
+        db.update_status(
+            original.id,
+            ProcessingStatus.DONE,
+            calibre_book_id="42",
+        )
+
+        discovered = scan_inbox(
+            inbox,
+            db,
+            stability_check_interval=0,
+            calibre_record_exists=lambda _record: True,
+        )
+
+        assert discovered == []
+        db.close()
+
+
+class TestPipelineMetadata:
+    """Test metadata shaping before Calibre import."""
+
+    def test_calibre_title_includes_volume(self) -> None:
+        """Each volume should have a unique Calibre title."""
+        record = MangaRecord(title="苍蓝钢铁战舰", volume="3")
+
+        assert _build_calibre_title(record) == "苍蓝钢铁战舰 卷3"

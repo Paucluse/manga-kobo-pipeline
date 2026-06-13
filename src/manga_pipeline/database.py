@@ -7,6 +7,7 @@ Uses file_hash for idempotency — same file won't be re-imported.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import suppress
 from pathlib import Path
 
 from manga_pipeline.logging_config import get_logger
@@ -58,10 +59,8 @@ class Database:
         """Create tables if they don't exist."""
         self.conn.execute(CREATE_TABLE_SQL)
         # Migrate schema if needed
-        try:
+        with suppress(sqlite3.OperationalError):
             self.conn.execute("ALTER TABLE manga_records ADD COLUMN publisher TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass # Column already exists
         self.conn.commit()
 
     def close(self) -> None:

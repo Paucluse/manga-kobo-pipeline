@@ -17,7 +17,6 @@ from manga_pipeline.logging_config import get_logger
 from manga_pipeline.models import MangaRecord, ProcessingStatus
 from manga_pipeline.normalizer import normalize_to_cbz
 from manga_pipeline.review import move_to_review
-from manga_pipeline.stability import check_file_stable_quick
 
 logger = get_logger(__name__)
 
@@ -43,13 +42,18 @@ def process_all_pending(cfg: PipelineConfig, db: Database) -> int:
     ]:
         zombies = db.get_records_by_status(status)
         for z in zombies:
-            logger.info("[ID:%s] Recovering zombie %s task to %s", z.id, status.value, fallback.value)
+            logger.info(
+                "[ID:%s] Recovering zombie %s task to %s",
+                z.id,
+                status.value,
+                fallback.value,
+            )
             db.update_status(z.id, fallback)  # type: ignore
 
     # Process each stage in order
     for status_to_process in [
+        ProcessingStatus.DISCOVERED,
         ProcessingStatus.WAITING_STABLE,
-        ProcessingStatus.NORMALIZED,
         ProcessingStatus.METADATA_PARSED,
         ProcessingStatus.ARCHIVED,
         ProcessingStatus.CONVERTED,
@@ -58,7 +62,8 @@ def process_all_pending(cfg: PipelineConfig, db: Database) -> int:
         for record in records:
             try:
                 result = _advance_record(record, cfg, db)
-                if result and record.current_status == ProcessingStatus.DONE:
+                latest = db.get_record_by_id(record.id) if record.id else None
+                if result and latest and latest.current_status == ProcessingStatus.DONE:
                     completed += 1
             except Exception:
                 logger.exception(
@@ -88,6 +93,10 @@ def _advance_record(
     assert record_id is not None
 
     status = record.current_status
+
+    if status == ProcessingStatus.DISCOVERED:
+        db.update_status(record_id, ProcessingStatus.WAITING_STABLE)
+        return True
 
     if status == ProcessingStatus.WAITING_STABLE:
         return _step_parse_metadata(record_id, record, cfg, db)
@@ -296,7 +305,7 @@ def _step_import_calibre(
 
     # Build metadata for Calibre
     meta = CalibreMetadata(
-        title=record.title or record.file_name,
+        title=_build_calibre_title(record),
         authors=record.author,
         series=record.series,
         series_index=record.volume,
@@ -334,6 +343,7 @@ def _step_import_calibre(
                 if inbox_path.is_file():
                     inbox_path.unlink()
                     logger.info("[ID:%s] Deleted inbox original: %s", record_id, inbox_path.name)
+                    _delete_empty_inbox_parent(inbox_path.parent, cfg.paths.inbox, record_id)
             except OSError as e:
                 logger.warning(
                     "[ID:%s] Could not delete inbox file %s: %s", record_id, inbox_path.name, e
@@ -346,7 +356,10 @@ def _step_import_calibre(
                 logger.info("[ID:%s] Deleted converted file: %s", record_id, converted_path.name)
             except OSError as e:
                 logger.warning(
-                    "[ID:%s] Could not delete converted file %s: %s", record_id, converted_path.name, e
+                    "[ID:%s] Could not delete converted file %s: %s",
+                    record_id,
+                    converted_path.name,
+                    e,
                 )
 
         return True
@@ -369,7 +382,10 @@ def _step_import_calibre(
             db.update_status(
                 record_id,
                 ProcessingStatus.FAILED,
-                error_message=f"Calibre import failed after {cfg.processing.max_retries} retries: {result.stderr[:200]}",
+                error_message=(
+                    "Calibre import failed after "
+                    f"{cfg.processing.max_retries} retries: {result.stderr[:200]}"
+                ),
             )
             return False
 
@@ -387,3 +403,25 @@ def _build_clean_name(record: MangaRecord) -> str:
     if parts:
         return " ".join(parts)
     return record.file_name.rsplit(".", 1)[0]
+
+
+def _build_calibre_title(record: MangaRecord) -> str:
+    """Build a Calibre title that stays unique for each volume."""
+    title = record.title or record.file_name
+    if record.volume:
+        return f"{title} 卷{record.volume}"
+    return title
+
+
+def _delete_empty_inbox_parent(parent_path: Path, inbox_dir: Path, record_id: int) -> None:
+    """Delete an empty first-level inbox directory after its last volume is imported."""
+    if parent_path == inbox_dir or not parent_path.is_relative_to(inbox_dir):
+        return
+    if parent_path.parent != inbox_dir:
+        return
+
+    try:
+        parent_path.rmdir()
+        logger.info("[ID:%s] Deleted empty inbox directory: %s", record_id, parent_path.name)
+    except OSError:
+        return

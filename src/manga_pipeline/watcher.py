@@ -7,7 +7,6 @@ when new manga files are added.
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 
 from watchdog.events import (
@@ -18,6 +17,7 @@ from watchdog.events import (
 )
 from watchdog.observers import Observer
 
+from manga_pipeline.calibre import calibre_book_exists
 from manga_pipeline.config import PipelineConfig
 from manga_pipeline.database import Database
 from manga_pipeline.logging_config import get_logger
@@ -69,7 +69,16 @@ def watch_inbox(cfg: PipelineConfig, db: Database) -> None:
 
     # First, process any existing files
     logger.info("Initial scan of inbox: %s", inbox_dir)
-    scan_inbox(inbox_dir, db)
+    scan_inbox(
+        inbox_dir,
+        db,
+        stability_check_interval=cfg.processing.stable_check_interval,
+        calibre_record_exists=lambda record: calibre_book_exists(
+            record.calibre_book_id,
+            cfg.paths.calibre_library,
+            cfg.commands.calibredb,
+        ),
+    )
     process_all_pending(cfg, db)
 
     # Set up watcher
@@ -79,23 +88,39 @@ def watch_inbox(cfg: PipelineConfig, db: Database) -> None:
     observer.schedule(handler, str(inbox_dir), recursive=False)
     observer.start()
 
-    logger.info("Starting pipeline in event-driven mode: %s", inbox_dir)
+    logger.info(
+        "Starting pipeline in event-driven mode with %ds polling fallback: %s",
+        cfg.processing.poll_interval_seconds,
+        inbox_dir,
+    )
     logger.info("Press Ctrl+C to stop.")
 
     try:
         while True:
-            # Wait for filesystem event. Timeout of 60s ensures we occasionally
-            # wake up to retry failed files or check for stuck WAITING_STABLE files.
-            wake_up_event.wait(timeout=60.0)
+            # Filesystem events provide low latency; the timeout is the
+            # correctness path for FTP, Docker bind mounts, and missed events.
+            wake_up_event.wait(
+                timeout=float(cfg.processing.poll_interval_seconds)
+            )
             wake_up_event.clear()
 
             try:
                 # 1. Scan for new files
-                discovered = scan_inbox(inbox_dir, db)
+                discovered = scan_inbox(
+                    inbox_dir,
+                    db,
+                    stability_check_interval=cfg.processing.stable_check_interval,
+                    calibre_record_exists=lambda record: calibre_book_exists(
+                        record.calibre_book_id,
+                        cfg.paths.calibre_library,
+                        cfg.commands.calibredb,
+                    ),
+                )
                 if discovered:
                     logger.info(
-                        "Discovered and verified %d new stable file(s). Starting processing immediately.",
-                        len(discovered)
+                        "Discovered and verified %d new stable file(s). "
+                        "Starting processing immediately.",
+                        len(discovered),
                     )
 
                 # 2. Process pending tasks

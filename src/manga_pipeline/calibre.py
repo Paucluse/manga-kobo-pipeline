@@ -71,8 +71,6 @@ def build_calibredb_add_command(
         cmd.extend(["--series", metadata.series])
     if metadata.series_index:
         cmd.extend(["--series-index", metadata.series_index])
-    if metadata.publisher:
-        cmd.extend(["--publisher", metadata.publisher])
     if metadata.languages:
         cmd.extend(["--languages", metadata.languages])
     if metadata.tags:
@@ -82,6 +80,25 @@ def build_calibredb_add_command(
     cmd.append(str(file_path))
 
     return cmd
+
+
+def build_calibredb_set_metadata_command(
+    book_id: str,
+    library_path: Path,
+    field_name: str,
+    field_value: str,
+    calibredb_cmd: str = "calibredb",
+) -> list[str]:
+    """Build a calibredb set_metadata command for one metadata field."""
+    return [
+        calibredb_cmd,
+        "set_metadata",
+        "--with-library",
+        str(library_path),
+        "--field",
+        f"{field_name}:{field_value}",
+        book_id,
+    ]
 
 
 def run_calibredb_add(
@@ -116,6 +133,30 @@ def run_calibredb_add(
 
         if result.returncode == 0:
             book_id = _extract_book_id(result.stdout)
+            if not book_id:
+                logger.error(
+                    "calibredb add did not return a book id for %s. stdout=%s stderr=%s",
+                    file_path.name,
+                    result.stdout[:500],
+                    result.stderr[:500],
+                )
+                return CalibreImportResult(
+                    success=False,
+                    stdout=result.stdout,
+                    stderr=(
+                        result.stderr
+                        or "calibredb add did not return a book id"
+                    ),
+                    return_code=result.returncode,
+                )
+            if book_id and metadata.publisher:
+                _set_metadata_field(
+                    book_id=book_id,
+                    library_path=library_path,
+                    field_name="publisher",
+                    field_value=metadata.publisher,
+                    calibredb_cmd=calibredb_cmd,
+                )
             logger.info(
                 "Calibre import successful (book_id=%s): %s",
                 book_id or "unknown",
@@ -154,6 +195,84 @@ def run_calibredb_add(
             success=False,
             stderr="Import timed out after 120s",
             return_code=-2,
+        )
+
+
+def calibre_book_exists(
+    book_id: str,
+    library_path: Path,
+    calibredb_cmd: str = "calibredb",
+) -> bool:
+    """Return whether a Calibre book id exists in the target library."""
+    if not book_id:
+        return False
+
+    cmd = [
+        calibredb_cmd,
+        "show_metadata",
+        "--with-library",
+        str(library_path),
+        book_id,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning("Could not verify Calibre book_id=%s: %s", book_id, e)
+        return False
+
+    return result.returncode == 0
+
+
+def _set_metadata_field(
+    book_id: str,
+    library_path: Path,
+    field_name: str,
+    field_value: str,
+    calibredb_cmd: str = "calibredb",
+) -> None:
+    """Set one metadata field after import.
+
+    calibredb add supports only a subset of metadata fields. Publisher must be
+    applied with set_metadata after the book id is known.
+    """
+    cmd = build_calibredb_set_metadata_command(
+        book_id=book_id,
+        library_path=library_path,
+        field_name=field_name,
+        field_value=field_value,
+        calibredb_cmd=calibredb_cmd,
+    )
+    logger.info("Running calibredb: %s", " ".join(cmd))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning(
+            "Could not set Calibre metadata %s for book_id=%s: %s",
+            field_name,
+            book_id,
+            e,
+        )
+        return
+
+    if result.returncode != 0:
+        logger.warning(
+            "calibredb set_metadata failed for book_id=%s field=%s (rc=%d): %s",
+            book_id,
+            field_name,
+            result.returncode,
+            result.stderr[:500],
         )
 
 

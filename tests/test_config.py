@@ -56,6 +56,7 @@ class TestPipelineConfigDefaults:
         assert cfg.processing.cleanup_after_import is True
         assert cfg.processing.max_retries == 3
         assert cfg.processing.stable_check_seconds == 30
+        assert cfg.processing.poll_interval_seconds == 10
 
 
 class TestLoadConfigFromYaml:
@@ -159,6 +160,7 @@ class TestLoadConfigFromYaml:
             "processing": {
                 "stable_check_seconds": 60,
                 "stable_check_interval": 10,
+                "poll_interval_seconds": 15,
                 "delete_inbox_after_archive": False,
                 "cleanup_after_import": False,
                 "max_retries": 5,
@@ -176,6 +178,7 @@ class TestLoadConfigFromYaml:
         assert cfg.metadata.confidence_auto_accept == 0.9
         assert cfg.commands.kcc == "/usr/local/bin/kcc-c2e"
         assert cfg.processing.stable_check_seconds == 60
+        assert cfg.processing.poll_interval_seconds == 15
         assert cfg.logging.level == "DEBUG"
         assert len(cfg.metadata.default_tags) == 2
 
