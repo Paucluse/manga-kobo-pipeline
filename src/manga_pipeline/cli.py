@@ -25,7 +25,7 @@ from manga_pipeline.logging_config import get_logger, setup_logging
 
 app = typer.Typer(
     name="manga-pipeline",
-    help="Manga pipeline: scan -> parse -> convert (KCC) -> import (Calibre) for Kobo Sage",
+    help="Manga pipeline: scan -> parse -> convert (KCC) -> import (Komga) for Kobo Sage",
     no_args_is_help=True,
 )
 
@@ -52,7 +52,7 @@ def doctor(
         None, "--config", "-c", help="Path to config.yaml"
     ),
 ) -> None:
-    """Check environment: config, directories, KCC, Calibre."""
+    """Check environment: config, directories, KCC, Komga."""
     console.print("\n[bold]manga-pipeline doctor[/bold]\n")
 
     cfg = _load_and_init(config_file)
@@ -77,7 +77,7 @@ def doctor(
         ("processing", cfg.paths.processing),
         ("archive_cbz", cfg.paths.archive_cbz),
         ("kepub_ready", cfg.paths.kepub_ready),
-        ("calibre_library", cfg.paths.calibre_library),
+        ("komga_library", cfg.paths.komga_library),
         ("state", cfg.paths.state),
         ("manual_review", cfg.paths.manual_review),
         ("logs", cfg.paths.logs),
@@ -106,7 +106,6 @@ def doctor(
 
     for cmd_name, cmd_path in [
         ("kcc", cfg.commands.kcc),
-        ("calibredb", cfg.commands.calibredb),
     ]:
         found = shutil.which(cmd_path)
         if found:
@@ -117,22 +116,34 @@ def doctor(
 
     console.print(cmd_table)
 
-    # --- Calibre library ---
-    console.print("\n[bold]Calibre library:[/bold]")
-    metadata_db = cfg.paths.calibre_library / "metadata.db"
-    if metadata_db.is_file():
-        console.print(f"  [green]\u2713[/green] metadata.db found at {metadata_db}")
-    elif cfg.paths.calibre_library.is_dir():
-        console.print(
-            f"  [yellow]![/yellow] Directory exists but no metadata.db at {metadata_db}"
+    # --- Komga connection ---
+    console.print("\n[bold]Komga server:[/bold]")
+    try:
+        import requests
+        from requests.auth import HTTPBasicAuth
+
+        resp = requests.get(
+            f"{cfg.komga.base_uri}/api/v1/libraries",
+            auth=HTTPBasicAuth(cfg.komga.user, cfg.komga.password),
+            timeout=5,
         )
-        console.print(
-            "      This is OK if this is a new library (calibredb will create it)"
-        )
+        if resp.status_code == 200:
+            libs = resp.json()
+            console.print(f"  [green]\u2713[/green] Connected to Komga at {cfg.komga.base_uri}")
+            console.print(f"  [green]\u2713[/green] Found {len(libs)} library(ies)")
+        else:
+            console.print(f"  [red]\u2717[/red] Komga returned HTTP {resp.status_code}")
+            all_ok = False
+    except Exception as e:
+        console.print(f"  [red]\u2717[/red] Cannot connect to Komga: {e}")
+        all_ok = False
+
+    # --- Komga library directory ---
+    console.print("\n[bold]Komga library directory:[/bold]")
+    if cfg.paths.komga_library.is_dir():
+        console.print(f"  [green]\u2713[/green] Library directory exists: {cfg.paths.komga_library}")
     else:
-        console.print(
-            f"  [red]\u2717[/red] Library directory missing: {cfg.paths.calibre_library}"
-        )
+        console.print(f"  [red]\u2717[/red] Library directory missing: {cfg.paths.komga_library}")
         all_ok = False
 
     # --- Summary ---
@@ -332,7 +343,6 @@ def dry_run(
     ),
 ) -> None:
     """Preview processing without execution."""
-    from manga_pipeline.calibre import CalibreMetadata, build_calibredb_add_command
     from manga_pipeline.filename_parser import parse_filename
     from manga_pipeline.kcc import build_kcc_command
 
@@ -346,6 +356,7 @@ def dry_run(
     console.print("[bold]Parsed metadata:[/bold]")
     console.print(f"  Title:      {parsed.title or '(none)'}")
     console.print(f"  Author:     {parsed.author or '(none)'}")
+    console.print(f"  Publisher:  {parsed.publisher or '(none)'}")
     console.print(f"  Series:     {parsed.series or '(none)'}")
     console.print(f"  Volume:     {parsed.volume or '(none)'}")
     console.print(f"  Confidence: {parsed.confidence:.2f}")
@@ -367,22 +378,10 @@ def dry_run(
     console.print("\n[bold]KCC command:[/bold]")
     console.print(f"  {' '.join(kcc_cmd)}")
 
-    # Calibre command
-    meta = CalibreMetadata(
-        title=parsed.title or p.stem,
-        authors=parsed.author,
-        series=parsed.series,
-        series_index=parsed.volume,
-        languages=cfg.metadata.default_language,
-        tags=",".join(cfg.metadata.default_tags),
-    )
-    cal_cmd = build_calibredb_add_command(
-        file_path=cfg.paths.kepub_ready / f"{p.stem}.epub",
-        library_path=cfg.paths.calibre_library,
-        metadata=meta,
-        calibredb_cmd=cfg.commands.calibredb,
-    )
-    console.print("\n[bold]Calibre command:[/bold]")
-    console.print(f"  {' '.join(cal_cmd)}")
+    # Komga destination
+    series_name = parsed.series or parsed.title or p.stem
+    dest = cfg.paths.komga_library / series_name / f"{p.stem}.kepub.epub"
+    console.print("\n[bold]Komga destination:[/bold]")
+    console.print(f"  {dest}")
     console.print()
 

@@ -25,7 +25,7 @@ class TestPipelineConfigDefaults:
         cfg = PipelineConfig()
         assert cfg.paths.inbox == Path("/data/inbox")
         assert cfg.paths.processing == Path("/data/processing")
-        assert cfg.paths.calibre_library == Path("/data/calibre-library")
+        assert cfg.paths.komga_library == Path("/data/komga-library")
 
     def test_default_kobo_profile(self) -> None:
         """Default Kobo profile should be KoS (Kobo Sage)."""
@@ -47,7 +47,6 @@ class TestPipelineConfigDefaults:
         """Default commands should use bare names (found via PATH)."""
         cfg = PipelineConfig()
         assert cfg.commands.kcc == "kcc-c2e"
-        assert cfg.commands.calibredb == "calibredb"
 
     def test_default_processing(self) -> None:
         """Default processing should have safe defaults."""
@@ -136,7 +135,7 @@ class TestLoadConfigFromYaml:
                 "processing": "/srv/ebooks/processing",
                 "archive_cbz": "/srv/ebooks/archive_cbz",
                 "kepub_ready": "/srv/ebooks/kepub_ready",
-                "calibre_library": "/srv/ebooks/calibre-library",
+                "komga_library": "/srv/ebooks/komga-library",
                 "state": "/srv/ebooks/state",
                 "manual_review": "/srv/ebooks/manual-review",
                 "logs": "/srv/ebooks/logs",
@@ -154,7 +153,6 @@ class TestLoadConfigFromYaml:
             },
             "commands": {
                 "kcc": "/usr/local/bin/kcc-c2e",
-                "calibredb": "/usr/bin/calibredb",
             },
             "processing": {
                 "stable_check_seconds": 60,

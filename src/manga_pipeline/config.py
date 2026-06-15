@@ -21,7 +21,7 @@ class PathsConfig(BaseModel):
     processing: Path = Path("/data/processing")
     archive_cbz: Path = Path("/data/archive_cbz")
     kepub_ready: Path = Path("/data/kepub_ready")
-    calibre_library: Path = Path("/data/calibre-library")
+    komga_library: Path = Path("/data/komga-library")
     state: Path = Path("/data/state")
     manual_review: Path = Path("/data/manual-review")
     logs: Path = Path("/data/logs")
@@ -48,7 +48,22 @@ class CommandsConfig(BaseModel):
     """External command paths."""
 
     kcc: str = "kcc-c2e"
-    calibredb: str = "calibredb"
+
+
+class KomgaServerConfig(BaseModel):
+    """Komga server connection settings."""
+
+    base_uri: str = "http://komga:25600"
+    user: str = "admin@manga.local"
+    password: str = "changeme"
+    library_id: str = ""  # Will auto-detect if empty
+
+
+class KomfConfig(BaseModel):
+    """Komf metadata fetcher settings."""
+
+    enabled: bool = True
+    base_uri: str = "http://komf:8085"
 
 
 class ProcessingConfig(BaseModel):
@@ -75,6 +90,8 @@ class PipelineConfig(BaseModel):
     kobo: KoboConfig = Field(default_factory=KoboConfig)
     metadata: MetadataConfig = Field(default_factory=MetadataConfig)
     commands: CommandsConfig = Field(default_factory=CommandsConfig)
+    komga: KomgaServerConfig = Field(default_factory=KomgaServerConfig)
+    komf: KomfConfig = Field(default_factory=KomfConfig)
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

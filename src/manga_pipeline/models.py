@@ -44,7 +44,7 @@ class MangaRecord:
     confidence: float = 0.0
     archive_path: str = ""
     converted_path: str = ""
-    calibre_book_id: str = ""
+    library_book_id: str = ""
     error_message: str = ""
     retry_count: int = 0
     created_at: str = field(

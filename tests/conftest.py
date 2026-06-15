@@ -13,7 +13,7 @@ def tmp_data_dir(tmp_path: Path) -> Path:
         "processing",
         "archive_cbz",
         "kepub_ready",
-        "calibre-library",
+        "komga-library",
         "state",
         "manual-review",
         "logs",

@@ -6,13 +6,15 @@ discovered -> stable -> parse -> normalize -> archive -> convert -> import -> do
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
-from manga_pipeline.calibre import CalibreMetadata, run_calibredb_add
 from manga_pipeline.config import PipelineConfig
 from manga_pipeline.database import Database
 from manga_pipeline.filename_parser import parse_filename
 from manga_pipeline.kcc import run_kcc
+from manga_pipeline.komga import get_library_id, trigger_library_scan
+from manga_pipeline.komf_client import trigger_series_match
 from manga_pipeline.logging_config import get_logger
 from manga_pipeline.models import MangaRecord, ProcessingStatus
 from manga_pipeline.normalizer import normalize_to_cbz
@@ -99,7 +101,7 @@ def _advance_record(
         return _step_convert_kcc(record_id, record, cfg, db)
 
     if status == ProcessingStatus.CONVERTED:
-        return _step_import_calibre(record_id, record, cfg, db)
+        return _step_import_komga(record_id, record, cfg, db)
 
     return False
 
@@ -271,13 +273,13 @@ def _step_convert_kcc(
             return False
 
 
-def _step_import_calibre(
+def _step_import_komga(
     record_id: int,
     record: MangaRecord,
     cfg: PipelineConfig,
     db: Database,
 ) -> bool:
-    """Import converted file into Calibre library."""
+    """Import converted file into Komga library by moving it to the library directory."""
     converted_path = Path(record.converted_path)
     if not converted_path.is_file():
         db.update_status(
@@ -287,91 +289,112 @@ def _step_import_calibre(
         )
         return False
 
-    # Rename .kepub.epub to .kepub so Calibre registers it as KEPUB format natively
-    if converted_path.name.endswith(".kepub.epub"):
-        new_path = converted_path.with_name(converted_path.name.replace(".kepub.epub", ".kepub"))
-        converted_path = converted_path.rename(new_path)
-        # Update DB with new path so cleanup finds it later
-        db.update_status(record_id, ProcessingStatus.CONVERTED, converted_path=str(converted_path))
-
-    # Build metadata for Calibre
-    meta = CalibreMetadata(
-        title=record.title or record.file_name,
-        authors=record.author,
-        series=record.series,
-        series_index=record.volume,
-        publisher=record.publisher,
-        languages=cfg.metadata.default_language,
-        tags=",".join(cfg.metadata.default_tags),
-    )
-
     db.update_status(record_id, ProcessingStatus.IMPORTING)
 
-    result = run_calibredb_add(
-        file_path=converted_path,
-        library_path=cfg.paths.calibre_library,
-        metadata=meta,
-        calibredb_cmd=cfg.commands.calibredb,
-    )
+    # Build destination path: komga_library / series_name / filename
+    series_name = record.series or record.title or "Unknown"
+    # Sanitize directory name
+    series_name = _sanitize_dirname(series_name)
+    series_dir = cfg.paths.komga_library / series_name
+    series_dir.mkdir(parents=True, exist_ok=True)
 
-    if result.success:
-        db.update_status(
-            record_id,
-            ProcessingStatus.DONE,
-            calibre_book_id=result.book_id,
-        )
+    dest_path = series_dir / converted_path.name
+
+    try:
+        # Move (or copy + delete) the converted file into the Komga library
+        shutil.move(str(converted_path), str(dest_path))
         logger.info(
-            "[ID:%s] Imported to Calibre: %s (book_id=%s)",
+            "[ID:%s] Moved to Komga library: %s -> %s",
             record_id,
-            record.file_name,
-            result.book_id,
+            converted_path.name,
+            dest_path,
         )
-
-        # Clean up: delete original from inbox
-        if cfg.processing.delete_inbox_after_archive:
-            inbox_path = Path(record.original_path)
-            try:
-                if inbox_path.is_file():
-                    inbox_path.unlink()
-                    logger.info("[ID:%s] Deleted inbox original: %s", record_id, inbox_path.name)
-            except OSError as e:
-                logger.warning(
-                    "[ID:%s] Could not delete inbox file %s: %s", record_id, inbox_path.name, e
-                )
-
-        # Clean up: delete converted file from kepub_ready
-        if cfg.processing.cleanup_after_import:
-            try:
-                converted_path.unlink()
-                logger.info("[ID:%s] Deleted converted file: %s", record_id, converted_path.name)
-            except OSError as e:
-                logger.warning(
-                    "[ID:%s] Could not delete converted file %s: %s", record_id, converted_path.name, e
-                )
-
-        return True
-    else:
-        # Check retry
+    except OSError as e:
+        logger.error("[ID:%s] Failed to move file to Komga library: %s", record_id, e)
         if record.retry_count < cfg.processing.max_retries:
             db.increment_retry(record_id)
-            logger.warning(
-                "[ID:%s] Calibre import failed for %s (retry %d/%d): %s",
-                record_id,
-                record.file_name,
-                record.retry_count + 1,
-                cfg.processing.max_retries,
-                result.stderr[:200],
-            )
-            # Revert status back to CONVERTED so it can be retried
             db.update_status(record_id, ProcessingStatus.CONVERTED)
             return False
         else:
             db.update_status(
                 record_id,
                 ProcessingStatus.FAILED,
-                error_message=f"Calibre import failed after {cfg.processing.max_retries} retries: {result.stderr[:200]}",
+                error_message=f"Failed to move to Komga library: {e}",
             )
             return False
+
+    # Trigger Komga library scan
+    library_id = cfg.komga.library_id
+    if not library_id:
+        library_id = get_library_id(
+            cfg.komga.base_uri, cfg.komga.user, cfg.komga.password
+        ) or ""
+
+    if library_id:
+        scan_result = trigger_library_scan(
+            base_uri=cfg.komga.base_uri,
+            library_id=library_id,
+            user=cfg.komga.user,
+            password=cfg.komga.password,
+        )
+        if not scan_result.success:
+            logger.warning(
+                "[ID:%s] Komga scan trigger failed (non-fatal): %s",
+                record_id,
+                scan_result.error,
+            )
+    else:
+        logger.warning("[ID:%s] No Komga library ID found, skipping scan trigger.", record_id)
+
+    # Mark as done
+    db.update_status(
+        record_id,
+        ProcessingStatus.DONE,
+        library_book_id=series_name,
+    )
+    logger.info(
+        "[ID:%s] Successfully imported to Komga: %s (series=%s)",
+        record_id,
+        record.file_name,
+        series_name,
+    )
+
+    # Clean up: delete original from inbox
+    if cfg.processing.delete_inbox_after_archive:
+        inbox_path = Path(record.original_path)
+        try:
+            if inbox_path.is_file():
+                inbox_path.unlink()
+                logger.info("[ID:%s] Deleted inbox original: %s", record_id, inbox_path.name)
+        except OSError as e:
+            logger.warning(
+                "[ID:%s] Could not delete inbox file %s: %s", record_id, inbox_path.name, e
+            )
+
+    # Trigger Komf metadata scraping (best-effort, non-blocking)
+    if cfg.komf.enabled:
+        try:
+            # Komf needs the Komga series ID. We'll trigger a match by series name.
+            # This is best-effort — if it fails, the book is still in Komga.
+            trigger_series_match(
+                komf_base_uri=cfg.komf.base_uri,
+                series_id=series_name,  # Komf will search by name
+            )
+        except Exception:
+            logger.warning("[ID:%s] Komf scraping failed (non-fatal).", record_id)
+
+    return True
+
+
+def _sanitize_dirname(name: str) -> str:
+    """Sanitize a string for use as a directory name."""
+    # Remove characters that are problematic in file paths
+    forbidden = '<>:"/\\|?*'
+    for ch in forbidden:
+        name = name.replace(ch, "")
+    # Collapse whitespace
+    name = " ".join(name.split())
+    return name.strip() or "Unknown"
 
 
 def _build_clean_name(record: MangaRecord) -> str:

@@ -12,7 +12,7 @@ services:
       - ${DATA_ROOT:-/srv/ebooks}/processing:/data/processing
       - ${DATA_ROOT:-/srv/ebooks}/archive_cbz:/data/archive_cbz
       - ${DATA_ROOT:-/srv/ebooks}/kepub_ready:/data/kepub_ready
-      - ${DATA_ROOT:-/srv/ebooks}/calibre-library:/data/calibre-library
+      - ${DATA_ROOT:-/srv/ebooks}/komga-library:/data/komga-library
       - ${DATA_ROOT:-/srv/ebooks}/pipeline-state:/data/state
       - ${DATA_ROOT:-/srv/ebooks}/manual-review:/data/manual-review
       - ${DATA_ROOT:-/srv/ebooks}/logs:/data/logs
@@ -21,22 +21,37 @@ services:
       - MANGA_PIPELINE_CONFIG=/app/config.yaml
       - MANGA_PIPELINE_LOG_LEVEL=${MANGA_PIPELINE_LOG_LEVEL:-INFO}
       - HOME=/tmp
+    depends_on:
+      - komga
     # 默认 run 模式（持续监听 inbox），可覆盖为其他命令：
     # command: ["process"]   # 单次处理
     # command: ["scan"]      # 仅扫描
 
-  # ── Calibre-Web（网页书库 + Kobo 同步）────────────────────
-  calibre-web:
-    image: lscr.io/linuxserver/calibre-web:latest
-    container_name: calibre-web
+  # ── Komga（漫画书库 + 网页阅读 + Kobo 同步）────────────────
+  komga:
+    image: gotson/komga:latest
+    container_name: komga
     restart: unless-stopped
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Asia/Shanghai
-      - DOCKER_MODS=linuxserver/mods:universal-calibre
     volumes:
-      - ${DATA_ROOT:-/srv/ebooks}/calibre-web-config:/config
-      - ${DATA_ROOT:-/srv/ebooks}/calibre-library:/books
+      - ${DATA_ROOT:-/srv/ebooks}/komga-config:/config
+      - ${DATA_ROOT:-/srv/ebooks}/komga-library:/data
     ports:
-      - "${CALIBRE_WEB_PORT:-8083}:8083"
+      - "${KOMGA_PORT:-25600}:25600"
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      - TZ=Asia/Shanghai
+
+  # ── Komf（元数据刮削器）────────────────────────────────────
+  komf:
+    image: sndxr/komf:latest
+    container_name: komf
+    restart: unless-stopped
+    volumes:
+      - ./komf:/config
+    ports:
+      - "${KOMF_PORT:-8085}:8085"
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      - KOMF_LOG_LEVEL=INFO
+    depends_on:
+      - komga
