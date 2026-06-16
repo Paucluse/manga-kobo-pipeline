@@ -7,6 +7,7 @@ Uses file_hash for idempotency — same file won't be re-imported.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import suppress
 from pathlib import Path
 
 from manga_pipeline.logging_config import get_logger
@@ -26,6 +27,11 @@ CREATE TABLE IF NOT EXISTS manga_records (
     series TEXT DEFAULT '',
     volume TEXT DEFAULT '',
     publisher TEXT DEFAULT '',
+    summary TEXT DEFAULT '',
+    cover_url TEXT DEFAULT '',
+    source_url TEXT DEFAULT '',
+    isbn TEXT DEFAULT '',
+    page_count TEXT DEFAULT '',
     confidence REAL DEFAULT 0.0,
     archive_path TEXT DEFAULT '',
     converted_path TEXT DEFAULT '',
@@ -60,12 +66,15 @@ class Database:
         # Migrate schema if needed
         for migration in [
             "ALTER TABLE manga_records ADD COLUMN publisher TEXT DEFAULT ''",
+            "ALTER TABLE manga_records ADD COLUMN summary TEXT DEFAULT ''",
+            "ALTER TABLE manga_records ADD COLUMN cover_url TEXT DEFAULT ''",
+            "ALTER TABLE manga_records ADD COLUMN source_url TEXT DEFAULT ''",
+            "ALTER TABLE manga_records ADD COLUMN isbn TEXT DEFAULT ''",
+            "ALTER TABLE manga_records ADD COLUMN page_count TEXT DEFAULT ''",
             "ALTER TABLE manga_records RENAME COLUMN calibre_book_id TO library_book_id",
         ]:
-            try:
+            with suppress(sqlite3.OperationalError):
                 self.conn.execute(migration)
-            except sqlite3.OperationalError:
-                pass  # Column already exists or already renamed
         self.conn.commit()
 
     def close(self) -> None:
@@ -88,10 +97,11 @@ class Database:
             """
             INSERT INTO manga_records (
                 original_path, file_name, file_hash, current_status,
-                title, author, series, volume, publisher, confidence,
+                title, author, series, volume, publisher,
+                summary, cover_url, source_url, isbn, page_count, confidence,
                 archive_path, converted_path, library_book_id,
                 error_message, retry_count, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.original_path,
@@ -103,6 +113,11 @@ class Database:
                 record.series,
                 record.volume,
                 record.publisher,
+                record.summary,
+                record.cover_url,
+                record.source_url,
+                record.isbn,
+                record.page_count,
                 record.confidence,
                 record.archive_path,
                 record.converted_path,
@@ -217,6 +232,11 @@ class Database:
             series=row["series"],
             volume=row["volume"],
             publisher=row["publisher"],
+            summary=row["summary"],
+            cover_url=row["cover_url"],
+            source_url=row["source_url"],
+            isbn=row["isbn"],
+            page_count=row["page_count"],
             confidence=row["confidence"],
             archive_path=row["archive_path"],
             converted_path=row["converted_path"],

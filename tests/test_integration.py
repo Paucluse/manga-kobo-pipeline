@@ -264,7 +264,7 @@ class TestScannerIntegration:
     def test_scan_records_have_correct_status(
         self, tmp_path: Path
     ) -> None:
-        """Scanned files should have DISCOVERED status."""
+        """Scanned stable files should be ready for processing."""
         inbox = tmp_path / "inbox"
         inbox.mkdir()
         (inbox / "test.cbz").write_bytes(b"test data")
@@ -272,7 +272,7 @@ class TestScannerIntegration:
         db = Database(tmp_path / "state" / "test.db")
         discovered = scan_inbox(inbox, db)
 
-        assert discovered[0].current_status == ProcessingStatus.DISCOVERED
+        assert discovered[0].current_status == ProcessingStatus.WAITING_STABLE
         assert discovered[0].file_hash != ""
         db.close()
 

@@ -7,7 +7,6 @@ when new manga files are added.
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 
 from watchdog.events import (
@@ -94,8 +93,9 @@ def watch_inbox(cfg: PipelineConfig, db: Database) -> None:
                 discovered = scan_inbox(inbox_dir, db)
                 if discovered:
                     logger.info(
-                        "Discovered and verified %d new stable file(s). Starting processing immediately.",
-                        len(discovered)
+                        "Discovered and verified %d new stable file(s). "
+                        "Starting processing immediately.",
+                        len(discovered),
                     )
 
                 # 2. Process pending tasks

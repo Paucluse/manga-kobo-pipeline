@@ -40,18 +40,3 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       - TZ=Asia/Shanghai
-
-  # ── Komf（元数据刮削器）────────────────────────────────────
-  komf:
-    image: sndxr/komf:latest
-    container_name: komf
-    restart: unless-stopped
-    volumes:
-      - ./komf:/config
-    ports:
-      - "${KOMF_PORT:-8085}:8085"
-    user: "${PUID:-1000}:${PGID:-1000}"
-    environment:
-      - KOMF_LOG_LEVEL=INFO
-    depends_on:
-      - komga

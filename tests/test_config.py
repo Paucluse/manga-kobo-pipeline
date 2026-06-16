@@ -40,6 +40,11 @@ class TestPipelineConfigDefaults:
         cfg = PipelineConfig()
         assert cfg.metadata.default_language == "zho"
         assert cfg.metadata.confidence_auto_accept == 0.4
+        assert cfg.metadata.bookwalker_tw_enabled is True
+        assert cfg.metadata.bookwalker_tw_min_confidence == 0.65
+        assert cfg.metadata.download_bookwalker_covers is True
+        assert cfg.metadata.llm_normalize_enabled is False
+        assert cfg.metadata.llm_api_key_env == "OPENAI_API_KEY"
         assert "manga" in cfg.metadata.default_tags
         assert "kobo-sync" in cfg.metadata.default_tags
 

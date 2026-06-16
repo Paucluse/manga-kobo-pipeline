@@ -61,10 +61,10 @@ VOLUME_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"第(\d+)巻"), "kan"),
     # 第01卷, 第001卷 (Chinese)
     (re.compile(r"第(\d+)卷"), "juan"),
-    # v01, v001
-    (re.compile(r"v\.?(\d+)", re.IGNORECASE), "v"),
-    # vol.01, vol 01, Vol.01
-    (re.compile(r"vol\.?\s*(\d+)", re.IGNORECASE), "vol"),
+    # v01, v_01, v.001
+    (re.compile(r"v[._\-\s]?(\d+)", re.IGNORECASE), "v"),
+    # vol.01, vol 01, Vol_01
+    (re.compile(r"vol[._\-\s]*(\d+)", re.IGNORECASE), "vol"),
     # Trailing number: title 01.cbz, title 001.cbz
     (re.compile(r"\s(\d{1,3})$"), "bare"),
 ]
@@ -112,7 +112,13 @@ def parse_filename(filename: str) -> ParseResult:
     # --- Heuristics to assign Title, Author, Publisher ---
     if not title_candidate:
         # Title was inside the brackets! e.g., [Title][Author][Publisher] vol1.cbz
-        if len(brackets) == 3:
+        if len(brackets) >= 4:
+            result.title = brackets[1]
+            result.author = brackets[2]
+            result.publisher = brackets[3]
+            confidence_parts.append(0.3)
+            confidence_parts.append(0.2)
+        elif len(brackets) == 3:
             result.title = brackets[0]
             result.author = brackets[1]
             result.publisher = brackets[2]

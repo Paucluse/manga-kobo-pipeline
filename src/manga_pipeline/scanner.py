@@ -41,7 +41,7 @@ def scan_inbox(inbox_dir: Path, db: Database) -> list[MangaRecord]:
         return []
 
     discovered: list[MangaRecord] = []
-    
+
     # 1. Find all potential new files
     potential_files = []
     for file_path in sorted(inbox_dir.iterdir()):

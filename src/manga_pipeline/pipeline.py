@@ -9,17 +9,19 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from manga_pipeline.bookwalker_tw import download_cover, search_bookwalker_tw
+from manga_pipeline.comicinfo import write_comicinfo_to_cbz
 from manga_pipeline.config import PipelineConfig
 from manga_pipeline.database import Database
+from manga_pipeline.epub_metadata import write_epub_metadata
 from manga_pipeline.filename_parser import parse_filename
 from manga_pipeline.kcc import run_kcc
 from manga_pipeline.komga import get_library_id, trigger_library_scan
-from manga_pipeline.komf_client import trigger_series_match
+from manga_pipeline.llm_metadata import normalize_with_llm
 from manga_pipeline.logging_config import get_logger
 from manga_pipeline.models import MangaRecord, ProcessingStatus
 from manga_pipeline.normalizer import normalize_to_cbz
 from manga_pipeline.review import move_to_review
-from manga_pipeline.stability import check_file_stable_quick
 
 logger = get_logger(__name__)
 
@@ -45,7 +47,12 @@ def process_all_pending(cfg: PipelineConfig, db: Database) -> int:
     ]:
         zombies = db.get_records_by_status(status)
         for z in zombies:
-            logger.info("[ID:%s] Recovering zombie %s task to %s", z.id, status.value, fallback.value)
+            logger.info(
+                "[ID:%s] Recovering zombie %s task to %s",
+                z.id,
+                status.value,
+                fallback.value,
+            )
             db.update_status(z.id, fallback)  # type: ignore
 
     # Process each stage in order
@@ -114,6 +121,59 @@ def _step_parse_metadata(
 ) -> bool:
     """Parse filename metadata."""
     parsed = parse_filename(record.file_name)
+    try:
+        llm_metadata = normalize_with_llm(record.file_name, parsed, cfg.metadata)
+    except Exception as e:
+        logger.warning("[ID:%s] LLM filename normalization failed: %s", record_id, e)
+        llm_metadata = None
+
+    if llm_metadata and llm_metadata.confidence >= 0.65:
+        logger.info(
+            "[ID:%s] LLM normalized filename: title=%s, author=%s, vol=%s",
+            record_id,
+            llm_metadata.title,
+            llm_metadata.author,
+            llm_metadata.volume,
+        )
+        parsed.title = llm_metadata.title or parsed.title
+        parsed.series = llm_metadata.title or parsed.series
+        parsed.author = llm_metadata.author or parsed.author
+        parsed.publisher = llm_metadata.publisher or parsed.publisher
+        parsed.volume = llm_metadata.volume or parsed.volume
+        parsed.confidence = max(parsed.confidence, llm_metadata.confidence)
+
+    bookwalker = None
+    accepted_bookwalker = None
+    if cfg.metadata.bookwalker_tw_enabled and parsed.title:
+        try:
+            bookwalker = search_bookwalker_tw(
+                parsed.title,
+                volume=parsed.volume,
+                author=parsed.author,
+                max_candidates=cfg.metadata.bookwalker_tw_max_candidates,
+            )
+        except Exception as e:
+            logger.warning("[ID:%s] BookWalker TW lookup failed: %s", record_id, e)
+
+    if (
+        bookwalker is not None
+        and bookwalker.confidence >= cfg.metadata.bookwalker_tw_min_confidence
+    ):
+        accepted_bookwalker = bookwalker
+        logger.info(
+            "[ID:%s] BookWalker TW matched %s (confidence=%.2f, product=%s)",
+            record_id,
+            bookwalker.title,
+            bookwalker.confidence,
+            bookwalker.product_id,
+        )
+        parsed.title = bookwalker.series or parsed.title
+        parsed.series = bookwalker.series or parsed.series or parsed.title
+        parsed.volume = bookwalker.volume or parsed.volume
+        parsed.author = bookwalker.author_text or parsed.author
+        parsed.publisher = bookwalker.publisher or parsed.publisher
+        parsed.confidence = max(parsed.confidence, bookwalker.confidence)
+
     logger.info(
         "[ID:%s] Parsed %s: title=%s, author=%s, vol=%s (confidence=%.2f)",
         record_id,
@@ -162,6 +222,11 @@ def _step_parse_metadata(
         series=parsed.series,
         volume=parsed.volume,
         publisher=parsed.publisher,
+        summary=accepted_bookwalker.summary if accepted_bookwalker else "",
+        cover_url=accepted_bookwalker.cover_url if accepted_bookwalker else "",
+        source_url=accepted_bookwalker.detail_url if accepted_bookwalker else "",
+        isbn=accepted_bookwalker.isbn if accepted_bookwalker else "",
+        page_count=accepted_bookwalker.page_count if accepted_bookwalker else "",
         confidence=str(parsed.confidence),
     )
     return True
@@ -190,6 +255,19 @@ def _step_normalize_and_archive(
         # Normalize to CBZ in archive directory
         archive_path = normalize_to_cbz(
             file_path, cfg.paths.archive_cbz, clean_name
+        )
+        write_comicinfo_to_cbz(
+            archive_path,
+            title=_build_book_title(record),
+            series=_build_series_name(record),
+            number=record.volume,
+            writer=record.author,
+            publisher=record.publisher,
+            summary=record.summary,
+            web=record.source_url,
+            language_iso=cfg.metadata.default_language,
+            manga=cfg.kobo.manga_style,
+            tags=cfg.metadata.default_tags,
         )
 
         db.update_status(
@@ -239,6 +317,21 @@ def _step_convert_kcc(
     )
 
     if result.success and result.output_path:
+        converted_path = Path(result.output_path)
+        try:
+            write_epub_metadata(
+                converted_path,
+                title=_build_book_title(record),
+                series=_build_series_name(record),
+                number=record.volume,
+                writer=record.author,
+                language_iso=cfg.metadata.default_language,
+                summary=record.summary,
+                manga=cfg.kobo.manga_style,
+            )
+        except (KeyError, ValueError, OSError) as e:
+            logger.warning("[ID:%s] Could not update EPUB metadata: %s", record_id, e)
+
         db.update_status(
             record_id,
             ProcessingStatus.CONVERTED,
@@ -303,6 +396,7 @@ def _step_import_komga(
     try:
         # Move (or copy + delete) the converted file into the Komga library
         shutil.move(str(converted_path), str(dest_path))
+        _download_bookwalker_artwork(record, dest_path, series_dir, cfg)
         logger.info(
             "[ID:%s] Moved to Komga library: %s -> %s",
             record_id,
@@ -371,18 +465,6 @@ def _step_import_komga(
                 "[ID:%s] Could not delete inbox file %s: %s", record_id, inbox_path.name, e
             )
 
-    # Trigger Komf metadata scraping (best-effort, non-blocking)
-    if cfg.komf.enabled:
-        try:
-            # Komf needs the Komga series ID. We'll trigger a match by series name.
-            # This is best-effort — if it fails, the book is still in Komga.
-            trigger_series_match(
-                komf_base_uri=cfg.komf.base_uri,
-                series_id=series_name,  # Komf will search by name
-            )
-        except Exception:
-            logger.warning("[ID:%s] Komf scraping failed (non-fatal).", record_id)
-
     return True
 
 
@@ -397,16 +479,71 @@ def _sanitize_dirname(name: str) -> str:
     return name.strip() or "Unknown"
 
 
-def _build_clean_name(record: MangaRecord) -> str:
-    """Build a clean filename from parsed metadata."""
-    parts = []
-    if record.author:
-        parts.append(f"[{record.author}]")
-    if record.title:
-        parts.append(record.title)
-    if record.volume:
-        parts.append(f"v{record.volume.zfill(2)}")
+def _download_bookwalker_artwork(
+    record: MangaRecord,
+    dest_path: Path,
+    series_dir: Path,
+    cfg: PipelineConfig,
+) -> None:
+    """Download BookWalker cover art as Komga local artwork sidecars."""
+    if not cfg.metadata.download_bookwalker_covers or not record.cover_url:
+        return
 
-    if parts:
-        return " ".join(parts)
-    return record.file_name.rsplit(".", 1)[0]
+    book_cover_path = dest_path.with_suffix(".jpg")
+    if download_cover(record.cover_url, book_cover_path):
+        logger.info("Downloaded BookWalker book cover: %s", book_cover_path.name)
+
+    series_cover_path = series_dir / "cover.jpg"
+    should_update_series_cover = (
+        not series_cover_path.exists() or _is_first_volume(record.volume)
+    )
+    if should_update_series_cover and download_cover(record.cover_url, series_cover_path):
+        logger.info("Downloaded BookWalker series cover: %s", series_cover_path.name)
+
+
+def _is_first_volume(volume: str) -> bool:
+    """Return whether a volume token represents the first book in a series."""
+    normalized = volume.strip().lower().lstrip("v")
+    return normalized in {"1", "01", "001"}
+
+
+def _build_clean_name(record: MangaRecord) -> str:
+    """Build a Komga-friendly filename from parsed metadata.
+
+    Komga groups books by parent directory, while book names come from the
+    filename. Keep the file stem predictable for metadata matchers and sorting;
+    richer display metadata is written into ComicInfo/EPUB metadata.
+    """
+    series = _build_series_name(record)
+    if series:
+        return _sanitize_filename(f"{series} {_format_volume_token(record.volume)}").strip()
+
+    return _sanitize_filename(record.file_name.rsplit(".", 1)[0])
+
+
+def _build_series_name(record: MangaRecord) -> str:
+    """Return the canonical series name used for Komga folders and metadata."""
+    return _sanitize_dirname(record.series or record.title or "")
+
+
+def _build_book_title(record: MangaRecord) -> str:
+    """Return a human-readable book title for Komga metadata."""
+    title = record.title or record.series or record.file_name.rsplit(".", 1)[0]
+    if record.volume:
+        return f"{title} 卷{record.volume}"
+    return title
+
+
+def _format_volume_token(volume: str) -> str:
+    """Return a scraper-friendly sortable volume token."""
+    if not volume:
+        return ""
+    if volume.isdigit():
+        return f"v{int(volume):03d}"
+    return f"v{volume}"
+
+
+def _sanitize_filename(name: str) -> str:
+    """Sanitize a string for use as a file stem."""
+    name = _sanitize_dirname(name)
+    return " ".join(name.split())

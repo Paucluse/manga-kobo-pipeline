@@ -41,7 +41,18 @@ class MetadataConfig(BaseModel):
 
     default_language: str = "zho"
     confidence_auto_accept: float = 0.4
-    default_tags: list[str] = Field(default_factory=lambda: ["manga", "chinese-translation", "kobo-sync"])
+    default_tags: list[str] = Field(
+        default_factory=lambda: ["manga", "chinese-translation", "kobo-sync"]
+    )
+    bookwalker_tw_enabled: bool = True
+    bookwalker_tw_min_confidence: float = 0.65
+    bookwalker_tw_max_candidates: int = 8
+    download_bookwalker_covers: bool = True
+    llm_normalize_enabled: bool = False
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_model: str = ""
+    llm_api_key_env: str = "OPENAI_API_KEY"
+    llm_timeout_seconds: int = 30
 
 
 class CommandsConfig(BaseModel):
@@ -57,13 +68,6 @@ class KomgaServerConfig(BaseModel):
     user: str = "admin@manga.local"
     password: str = "changeme"
     library_id: str = ""  # Will auto-detect if empty
-
-
-class KomfConfig(BaseModel):
-    """Komf metadata fetcher settings."""
-
-    enabled: bool = True
-    base_uri: str = "http://komf:8085"
 
 
 class ProcessingConfig(BaseModel):
@@ -91,7 +95,6 @@ class PipelineConfig(BaseModel):
     metadata: MetadataConfig = Field(default_factory=MetadataConfig)
     commands: CommandsConfig = Field(default_factory=CommandsConfig)
     komga: KomgaServerConfig = Field(default_factory=KomgaServerConfig)
-    komf: KomfConfig = Field(default_factory=KomfConfig)
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

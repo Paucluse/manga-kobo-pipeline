@@ -41,6 +41,11 @@ class MangaRecord:
     series: str = ""
     volume: str = ""
     publisher: str = ""
+    summary: str = ""
+    cover_url: str = ""
+    source_url: str = ""
+    isbn: str = ""
+    page_count: str = ""
     confidence: float = 0.0
     archive_path: str = ""
     converted_path: str = ""

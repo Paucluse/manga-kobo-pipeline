@@ -9,6 +9,8 @@ Reference: https://anansi-project.github.io/docs/comicinfo/documentation
 
 from __future__ import annotations
 
+import tempfile
+import zipfile
 from pathlib import Path
 from xml.etree.ElementTree import Element, SubElement, indent, tostring
 
@@ -18,6 +20,9 @@ def generate_comicinfo_xml(
     series: str = "",
     number: str = "",
     writer: str = "",
+    publisher: str = "",
+    summary: str = "",
+    web: str = "",
     language_iso: str = "zh",
     manga: bool = True,
     tags: list[str] | None = None,
@@ -50,6 +55,12 @@ def generate_comicinfo_xml(
         SubElement(root, "Number").text = number
     if writer:
         SubElement(root, "Writer").text = writer
+    if publisher:
+        SubElement(root, "Publisher").text = publisher
+    if summary:
+        SubElement(root, "Summary").text = summary
+    if web:
+        SubElement(root, "Web").text = web
     if language_iso:
         SubElement(root, "LanguageISO").text = language_iso
 
@@ -70,6 +81,9 @@ def write_comicinfo_to_cbz(
     series: str = "",
     number: str = "",
     writer: str = "",
+    publisher: str = "",
+    summary: str = "",
+    web: str = "",
     language_iso: str = "zh",
     manga: bool = True,
     tags: list[str] | None = None,
@@ -86,22 +100,40 @@ def write_comicinfo_to_cbz(
         manga: If True, sets Manga=YesAndRightToLeft.
         tags: List of tags/genres.
     """
-    import zipfile
-
     xml_content = generate_comicinfo_xml(
         title=title,
         series=series,
         number=number,
         writer=writer,
+        publisher=publisher,
+        summary=summary,
+        web=web,
         language_iso=language_iso,
         manga=manga,
         tags=tags,
     )
 
-    with zipfile.ZipFile(cbz_path, "a") as zf:
-        # Remove existing ComicInfo.xml if present
-        if "ComicInfo.xml" in zf.namelist():
-            # zipfile doesn't support deletion, so we skip
-            # (the new one will take precedence in most readers)
-            pass
-        zf.writestr("ComicInfo.xml", xml_content)
+    _replace_zip_member(cbz_path, "ComicInfo.xml", xml_content.encode("utf-8"))
+
+
+def _replace_zip_member(zip_path: Path, member_name: str, content: bytes) -> None:
+    """Replace a member in a zip archive without leaving duplicate entries."""
+    with tempfile.NamedTemporaryFile(
+        dir=zip_path.parent,
+        prefix=f".{zip_path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as src, zipfile.ZipFile(tmp_path, "w") as dst:
+            for item in src.infolist():
+                if item.filename == member_name:
+                    continue
+                dst.writestr(item, src.read(item.filename))
+            dst.writestr(member_name, content)
+        tmp_path.replace(zip_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise

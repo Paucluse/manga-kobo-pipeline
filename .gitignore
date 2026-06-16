@@ -18,6 +18,7 @@ venv/
 # Project
 config.yaml
 .env
+data/
 *.db
 *.sqlite
 *.log
@@ -32,4 +33,3 @@ Thumbs.db
 # Caches
 .pytest_cache/
 .ruff_cache/
-

@@ -58,6 +58,12 @@ class TestVolumePatterns:
         result = parse_filename("manga vol 03.cbz")
         assert result.volume == "3"
 
+    def test_vol_underscore_pattern(self) -> None:
+        """Vol_XX pattern."""
+        result = parse_filename("manga Vol_03.cbz")
+        assert result.volume == "3"
+        assert result.title == "manga"
+
     def test_bare_number(self) -> None:
         """Trailing number only."""
         result = parse_filename("ダンジョン飯 01.cbz")
@@ -193,6 +199,15 @@ class TestEdgeCases:
         """Series should be same as title for manga."""
         result = parse_filename("みなみけ 第01巻.cbz")
         assert result.series == result.title
+
+    def test_multi_bracket_release_with_leading_group(self) -> None:
+        """[Group][Title][Author][Publisher]Vol_XX should parse title and author."""
+        three_by_three_eyes = "3" + "\N{MULTIPLICATION SIGN}" + "3EYES"
+        result = parse_filename(f"[Comic][{three_by_three_eyes}][高田裕三][天下][C.C]Vol_01.zip")
+        assert result.title == three_by_three_eyes
+        assert result.author == "高田裕三"
+        assert result.publisher == "天下"
+        assert result.volume == "1"
 
 
 class TestConfidence:

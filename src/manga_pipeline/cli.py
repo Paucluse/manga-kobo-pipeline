@@ -141,7 +141,9 @@ def doctor(
     # --- Komga library directory ---
     console.print("\n[bold]Komga library directory:[/bold]")
     if cfg.paths.komga_library.is_dir():
-        console.print(f"  [green]\u2713[/green] Library directory exists: {cfg.paths.komga_library}")
+        console.print(
+            f"  [green]\u2713[/green] Library directory exists: {cfg.paths.komga_library}"
+        )
     else:
         console.print(f"  [red]\u2717[/red] Library directory missing: {cfg.paths.komga_library}")
         all_ok = False
@@ -384,4 +386,3 @@ def dry_run(
     console.print("\n[bold]Komga destination:[/bold]")
     console.print(f"  {dest}")
     console.print()
-

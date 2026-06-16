@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from manga_pipeline.config import KoboConfig
-from manga_pipeline.kcc import build_kcc_command, run_kcc
+from manga_pipeline.kcc import _ensure_kepub_extension, build_kcc_command, run_kcc
 
 
 class TestBuildKccCommand:
@@ -144,3 +144,14 @@ class TestRunKcc:
         assert result.success is False
         assert result.return_code == -2
         assert "timed out" in result.stderr.lower()
+
+    def test_ensure_kepub_extension(self, tmp_path: Path) -> None:
+        """Kobo output should use .kepub.epub for device-friendly imports."""
+        epub = tmp_path / "manga.epub"
+        epub.write_bytes(b"data")
+
+        result = _ensure_kepub_extension(epub)
+
+        assert result == str(tmp_path / "manga.kepub.epub")
+        assert not epub.exists()
+        assert (tmp_path / "manga.kepub.epub").is_file()

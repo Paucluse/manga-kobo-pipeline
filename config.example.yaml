@@ -7,7 +7,6 @@ paths:
   processing: /data/processing
   archive_cbz: /data/archive_cbz
   kepub_ready: /data/kepub_ready
-  calibre_library: /data/calibre-library
   state: /data/state
   manual_review: /data/manual-review
   logs: /data/logs
@@ -23,6 +22,15 @@ kobo:
 metadata:
   default_language: zho    # 中文（中文翻译版日漫）
   confidence_auto_accept: 0.4  # 低于此阈值进入人工确认
+  bookwalker_tw_enabled: true   # 使用 BookWalker 台湾作为元数据来源
+  bookwalker_tw_min_confidence: 0.65
+  bookwalker_tw_max_candidates: 8
+  download_bookwalker_covers: true
+  llm_normalize_enabled: false  # 可选：用 LLM 从文件名补齐标题/作者/出版社
+  llm_base_url: https://api.openai.com/v1
+  llm_model: ""
+  llm_api_key_env: OPENAI_API_KEY
+  llm_timeout_seconds: 30
   default_tags:
     - manga
     - chinese-translation
@@ -31,14 +39,20 @@ metadata:
 # 外部命令路径
 commands:
   kcc: kcc-c2e             # KCC 命令行工具
-  calibredb: calibredb     # Calibre 数据库工具
+
+# Komga 扫描触发配置
+komga:
+  base_uri: http://komga:25600
+  user: admin@manga.local
+  password: changeme
+  library_id: ""            # 留空时自动选择第一个 Komga 库
 
 # 处理参数
 processing:
   stable_check_seconds: 30   # 文件稳定检查总时长（秒）
   stable_check_interval: 5   # 检查间隔（秒）
   delete_inbox_after_archive: true  # 归档成功后删除 inbox 原文件
-  cleanup_after_import: true        # Calibre 导入成功后删除 kepub_ready 中的转换文件
+  cleanup_after_import: true        # 导入 Komga 后清理转换临时文件
   max_retries: 3             # 最大重试次数
 
 # 日志

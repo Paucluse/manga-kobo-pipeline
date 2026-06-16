@@ -103,6 +103,8 @@ def run_kcc(
         if result.returncode == 0:
             # Try to find the output file
             output_path = _find_output_file(output_dir, input_path)
+            if output_path and kobo_config and kobo_config.format.upper() == "KEPUB":
+                output_path = _ensure_kepub_extension(Path(output_path))
             logger.info("KCC conversion successful: %s", output_path)
             return KccResult(
                 success=True,
@@ -163,3 +165,21 @@ def _find_output_file(output_dir: Path, input_path: Path) -> str:
         return str(epubs[0])
 
     return ""
+
+
+def _ensure_kepub_extension(output_path: Path) -> str:
+    """Rename KCC's Kobo output to the conventional .kepub.epub suffix."""
+    if output_path.name.lower().endswith(".kepub.epub"):
+        return str(output_path)
+
+    if output_path.suffix.lower() != ".epub":
+        return str(output_path)
+
+    target = output_path.with_name(f"{output_path.stem}.kepub.epub")
+    if target == output_path:
+        return str(output_path)
+
+    if target.exists():
+        target.unlink()
+    output_path.rename(target)
+    return str(target)
