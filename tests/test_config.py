@@ -35,6 +35,17 @@ class TestPipelineConfigDefaults:
         assert cfg.kobo.high_quality is True
         assert cfg.kobo.format == "KEPUB"
 
+    def test_default_pdf(self) -> None:
+        """Default PDF settings should fit Kobo Sage without huge temporary output."""
+        cfg = PipelineConfig()
+        assert cfg.pdf.enabled is True
+        assert cfg.pdf.strategy == "extract_first"
+        assert cfg.pdf.render_fallback is False
+        assert cfg.pdf.preserve_original is True
+        assert cfg.pdf.dpi == 180
+        assert cfg.pdf.image_format == "jpg"
+        assert cfg.pdf.jpeg_quality == 92
+
     def test_default_metadata(self) -> None:
         """Default metadata should have Chinese language and manga tags."""
         cfg = PipelineConfig()
@@ -44,6 +55,7 @@ class TestPipelineConfigDefaults:
         assert cfg.metadata.bookwalker_tw_min_confidence == 0.65
         assert cfg.metadata.download_bookwalker_covers is True
         assert cfg.metadata.llm_normalize_enabled is False
+        assert cfg.metadata.llm_api_key_file is None
         assert cfg.metadata.llm_api_key_env == "OPENAI_API_KEY"
         assert "manga" in cfg.metadata.default_tags
         assert "kobo-sync" in cfg.metadata.default_tags
@@ -52,6 +64,8 @@ class TestPipelineConfigDefaults:
         """Default commands should use bare names (found via PATH)."""
         cfg = PipelineConfig()
         assert cfg.commands.kcc == "kcc-c2e"
+        assert cfg.commands.pdfimages == "pdfimages"
+        assert cfg.commands.pdftoppm == "pdftoppm"
 
     def test_default_processing(self) -> None:
         """Default processing should have safe defaults."""
@@ -151,9 +165,15 @@ class TestLoadConfigFromYaml:
                 "manga_style": True,
                 "high_quality": True,
             },
+            "pdf": {
+                "enabled": True,
+                "dpi": 450,
+                "image_format": "png",
+            },
             "metadata": {
                 "default_language": "zho",
                 "confidence_auto_accept": 0.9,
+                "llm_api_key_file": "/run/secrets/gemini_api_key",
                 "default_tags": ["manga", "chinese-translation"],
             },
             "commands": {
@@ -176,7 +196,10 @@ class TestLoadConfigFromYaml:
 
         cfg = load_config(config_file)
         assert cfg.paths.inbox == Path("/srv/ebooks/inbox")
+        assert cfg.pdf.dpi == 450
+        assert cfg.pdf.image_format == "png"
         assert cfg.metadata.confidence_auto_accept == 0.9
+        assert cfg.metadata.llm_api_key_file == Path("/run/secrets/gemini_api_key")
         assert cfg.commands.kcc == "/usr/local/bin/kcc-c2e"
         assert cfg.processing.stable_check_seconds == 60
         assert cfg.logging.level == "DEBUG"

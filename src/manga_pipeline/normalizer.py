@@ -4,24 +4,51 @@ Handles normalization of different archive formats:
 - CBZ/ZIP: Already in target format, just rename
 - CBR/RAR: Repack as CBZ
 - 7Z: Repack as CBZ
+- PDF: Extract embedded images with pdfimages, optionally rasterize as fallback
 - Image directories: Pack as CBZ
 """
 
 from __future__ import annotations
 
+import re
 import shutil
+import subprocess
+import tempfile
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
+from manga_pipeline.config import PdfConfig
 from manga_pipeline.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+PDFIMAGE_EXTENSIONS = IMAGE_EXTENSIONS | {".jp2", ".jbig2", ".ppm", ".pbm", ".pgm"}
+
+
+@dataclass(frozen=True)
+class PdfImageInfo:
+    """One image entry reported by pdfimages -list."""
+
+    page: int
+    number: int
+    width: int
+    height: int
+
+    @property
+    def area(self) -> int:
+        """Pixel area for selecting the page's primary image."""
+        return self.width * self.height
 
 
 def normalize_to_cbz(
     input_path: Path,
     output_dir: Path,
     target_name: str = "",
+    pdf_config: PdfConfig | None = None,
+    pdfimages_cmd: str = "pdfimages",
+    pdftoppm_cmd: str = "pdftoppm",
 ) -> Path:
     """Normalize a manga archive to CBZ format.
 
@@ -30,6 +57,9 @@ def normalize_to_cbz(
         output_dir: Directory for the output CBZ file.
         target_name: Desired filename (without .cbz extension).
                      If empty, uses the original stem.
+        pdf_config: PDF extraction/rasterization settings for .pdf inputs.
+        pdfimages_cmd: Command path for pdfimages.
+        pdftoppm_cmd: Command path for pdftoppm.
 
     Returns:
         Path to the output CBZ file.
@@ -55,6 +85,15 @@ def normalize_to_cbz(
 
     if suffix == ".7z":
         return _repack_7z_to_cbz(input_path, output_path)
+
+    if suffix == ".pdf":
+        return _normalize_pdf_to_cbz(
+            input_path,
+            output_path,
+            pdf_config or PdfConfig(),
+            pdfimages_cmd,
+            pdftoppm_cmd,
+        )
 
     if input_path.is_dir():
         return _pack_directory_to_cbz(input_path, output_path)
@@ -117,18 +156,317 @@ def _pack_directory_to_cbz(
     """Pack an image directory as CBZ."""
     logger.info("Packing directory -> CBZ: %s", dir_path.name)
 
-    image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
-
     with zipfile.ZipFile(
         output_path, "w", zipfile.ZIP_DEFLATED
     ) as zf:
-        for img_path in sorted(dir_path.rglob("*")):
+        for img_path in sorted(dir_path.iterdir()):
             if (
                 img_path.is_file()
-                and img_path.suffix.lower() in image_extensions
+                and img_path.suffix.lower() in IMAGE_EXTENSIONS
             ):
-                arcname = img_path.relative_to(dir_path)
-                zf.write(img_path, arcname)
+                zf.write(img_path, img_path.name)
 
     logger.info("Packed to: %s", output_path.name)
     return output_path
+
+
+def _normalize_pdf_to_cbz(
+    pdf_path: Path,
+    output_path: Path,
+    pdf_config: PdfConfig,
+    pdfimages_cmd: str,
+    pdftoppm_cmd: str,
+) -> Path:
+    """Normalize PDF according to the configured strategy."""
+    if not pdf_config.enabled:
+        msg = "PDF input is disabled"
+        raise ValueError(msg)
+
+    strategy = pdf_config.strategy.lower()
+    if strategy == "extract_first":
+        try:
+            result = _extract_pdf_images_to_cbz(
+                pdf_path,
+                output_path,
+                pdf_config,
+                pdfimages_cmd,
+            )
+            _preserve_original_pdf(pdf_path, output_path, pdf_config)
+            return result
+        except ValueError:
+            if not pdf_config.render_fallback:
+                raise
+            logger.warning("PDF image extraction failed; falling back to rasterization.")
+
+    if strategy in {"render", "rasterize", "extract_first"}:
+        result = _rasterize_pdf_to_cbz(
+            pdf_path,
+            output_path,
+            pdf_config,
+            pdftoppm_cmd,
+        )
+        _preserve_original_pdf(pdf_path, output_path, pdf_config)
+        return result
+
+    msg = f"Unsupported PDF strategy: {pdf_config.strategy}"
+    raise ValueError(msg)
+
+
+def _extract_pdf_images_to_cbz(
+    pdf_path: Path,
+    output_path: Path,
+    pdf_config: PdfConfig,
+    pdfimages_cmd: str,
+) -> Path:
+    """Extract embedded PDF images and pack the primary image from each page."""
+    logger.info("Extracting PDF images -> CBZ: %s", pdf_path.name)
+
+    image_infos = _list_pdf_images(pdf_path, pdfimages_cmd)
+    primary_images = _select_primary_pdf_images(image_infos)
+    if not primary_images:
+        msg = "PDF contains no extractable page images"
+        raise ValueError(msg)
+
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output_path.stem}-pdfimg-",
+        dir=output_path.parent,
+    ) as tmp:
+        tmp_dir = Path(tmp)
+        output_prefix = tmp_dir / "image"
+        command = [
+            pdfimages_cmd,
+            "-j",
+            "-png",
+            "-p",
+            str(pdf_path),
+            str(output_prefix),
+        ]
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout or "pdfimages failed").strip()
+            msg = f"PDF image extraction failed: {error}"
+            raise ValueError(msg)
+
+        extracted = [
+            path for path in tmp_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in PDFIMAGE_EXTENSIONS
+        ]
+        page_images = _match_extracted_pdf_images(
+            extracted,
+            primary_images,
+            output_prefix.name,
+        )
+        if len(page_images) < len(primary_images):
+            msg = (
+                "PDF image extraction did not produce one primary image per page "
+                f"({len(page_images)}/{len(primary_images)})"
+            )
+            raise ValueError(msg)
+
+        _pack_pdf_pages_to_cbz(page_images, output_path)
+
+    logger.info("Extracted PDF images to: %s", output_path.name)
+    return output_path
+
+
+def _list_pdf_images(pdf_path: Path, pdfimages_cmd: str) -> list[PdfImageInfo]:
+    """Return parseable image rows from pdfimages -list."""
+    result = subprocess.run(
+        [pdfimages_cmd, "-list", str(pdf_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        error = (result.stderr or result.stdout or "pdfimages -list failed").strip()
+        msg = f"PDF image listing failed: {error}"
+        raise ValueError(msg)
+
+    infos: list[PdfImageInfo] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or not parts[0].isdigit():
+            continue
+        if parts[2] != "image":
+            continue
+        try:
+            infos.append(
+                PdfImageInfo(
+                    page=int(parts[0]),
+                    number=int(parts[1]),
+                    width=int(parts[3]),
+                    height=int(parts[4]),
+                )
+            )
+        except ValueError:
+            continue
+
+    return infos
+
+
+def _select_primary_pdf_images(image_infos: list[PdfImageInfo]) -> list[PdfImageInfo]:
+    """Pick the largest image from each page."""
+    by_page: dict[int, PdfImageInfo] = {}
+    for info in image_infos:
+        current = by_page.get(info.page)
+        if current is None or info.area > current.area:
+            by_page[info.page] = info
+    return [by_page[page] for page in sorted(by_page)]
+
+
+def _match_extracted_pdf_images(
+    extracted: list[Path],
+    primary_images: list[PdfImageInfo],
+    prefix_name: str,
+) -> list[Path]:
+    """Match extracted pdfimages files to selected image rows."""
+    by_key: dict[tuple[int, int], Path] = {}
+    by_page: dict[int, list[Path]] = {}
+
+    for path in sorted(extracted, key=_pdf_page_sort_key):
+        parsed = _parse_pdfimages_output_name(path, prefix_name)
+        if parsed is None:
+            continue
+        page, number = parsed
+        by_key[(page, number)] = path
+        by_page.setdefault(page, []).append(path)
+
+    matched: list[Path] = []
+    for info in primary_images:
+        page_candidates = [info.page, info.page - 1]
+        selected = None
+        for page in page_candidates:
+            selected = by_key.get((page, info.number))
+            if selected is not None:
+                break
+        if selected is None:
+            for page in page_candidates:
+                candidates = by_page.get(page)
+                if candidates:
+                    selected = candidates[0]
+                    break
+        if selected is not None:
+            matched.append(selected)
+
+    return matched
+
+
+def _parse_pdfimages_output_name(path: Path, prefix_name: str) -> tuple[int, int] | None:
+    """Parse page/image number from pdfimages -p output names."""
+    stem = path.stem
+    if stem.startswith(prefix_name):
+        stem = stem[len(prefix_name):]
+    numbers = [int(value) for value in re.findall(r"\d+", stem)]
+    if len(numbers) < 2:
+        return None
+    return numbers[-2], numbers[-1]
+
+
+def _preserve_original_pdf(
+    pdf_path: Path,
+    output_path: Path,
+    pdf_config: PdfConfig,
+) -> None:
+    """Keep the source PDF beside the generated CBZ before inbox cleanup."""
+    if not pdf_config.preserve_original:
+        return
+    preserved_path = output_path.with_suffix(".source.pdf")
+    shutil.copy2(pdf_path, preserved_path)
+    logger.info("Preserved source PDF: %s", preserved_path.name)
+
+
+def _rasterize_pdf_to_cbz(
+    pdf_path: Path,
+    output_path: Path,
+    pdf_config: PdfConfig,
+    pdftoppm_cmd: str,
+) -> Path:
+    """Rasterize a PDF into page images and pack them as CBZ."""
+    if not pdf_config.enabled:
+        msg = "PDF input is disabled"
+        raise ValueError(msg)
+
+    image_format = pdf_config.image_format.lower()
+    if image_format not in {"jpg", "jpeg", "png"}:
+        msg = f"Unsupported PDF image format: {pdf_config.image_format}"
+        raise ValueError(msg)
+
+    logger.info(
+        "Rasterizing PDF -> CBZ: %s (dpi=%s, format=%s)",
+        pdf_path.name,
+        pdf_config.dpi,
+        image_format,
+    )
+
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output_path.stem}-pdf-",
+        dir=output_path.parent,
+    ) as tmp:
+        tmp_dir = Path(tmp)
+        output_prefix = tmp_dir / "page"
+        command = [
+            pdftoppm_cmd,
+            "-r",
+            str(pdf_config.dpi),
+        ]
+        if image_format in {"jpg", "jpeg"}:
+            command.extend(
+                [
+                    "-jpeg",
+                    "-jpegopt",
+                    f"quality={pdf_config.jpeg_quality},progressive=n,optimize=y",
+                ]
+            )
+            expected_suffixes = {".jpg", ".jpeg"}
+        else:
+            command.append("-png")
+            expected_suffixes = {".png"}
+
+        command.extend([str(pdf_path), str(output_prefix)])
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout or "pdftoppm failed").strip()
+            msg = f"PDF rasterization failed: {error}"
+            raise ValueError(msg)
+
+        page_images = [
+            path for path in tmp_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in expected_suffixes
+        ]
+        if not page_images:
+            msg = "PDF rasterization produced no page images"
+            raise ValueError(msg)
+
+        _pack_pdf_pages_to_cbz(page_images, output_path)
+
+    logger.info("Rasterized PDF to: %s", output_path.name)
+    return output_path
+
+
+def _pack_pdf_pages_to_cbz(page_images: list[Path], output_path: Path) -> None:
+    """Pack rasterized PDF pages into a CBZ with stable numeric names."""
+    sorted_pages = sorted(page_images, key=_pdf_page_sort_key)
+    suffix = sorted_pages[0].suffix.lower()
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for index, page in enumerate(sorted_pages, start=1):
+            arcname = f"{index:04d}{suffix}"
+            zf.write(page, arcname)
+
+
+def _pdf_page_sort_key(path: Path) -> tuple[int, str]:
+    """Sort pdftoppm output by trailing page number."""
+    stem = path.stem
+    number = stem.rsplit("-", 1)[-1]
+    if number.isdigit():
+        return int(number), path.name
+    return 0, path.name

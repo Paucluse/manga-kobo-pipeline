@@ -22,6 +22,7 @@
 - **单本封面**：每本书使用它自己在 BookWalker 台湾页面上的封面，写成 Komga 可识别的同名 `.jpg` sidecar。
 - **单本信息**：每本书的标题、卷号、作者、出版社、简介、ISBN、来源 URL 等以实际 BookWalker 台湾条目为准。
 - **命名**：导入 Komga 的文件名使用 `系列名 v001.kepub.epub` 这种稳定排序格式；显示标题写入元数据为 `系列名 卷1`。
+- **简繁转换**：BookWalker 台湾查询前会把中文标题转换为台繁，并同时尝试 `2`、`02`、不带卷号等查询，提升台版条目的命中率。
 
 ## 目录约定
 
@@ -69,16 +70,29 @@ KOMGA_PORT=25600
 MANGA_PIPELINE_LOG_LEVEL=INFO
 ```
 
-如果要开启 LLM 文件名规范化，在 `config.yaml` 中设置：
+如果要开启 LLM 文件名规范化，推荐使用 Google AI Studio / Gemini API。
+先创建本地密钥文件：
+
+```bash
+mkdir -p secrets
+chmod 700 secrets
+nano secrets/gemini_api_key
+chmod 600 secrets/gemini_api_key
+```
+
+`secrets/gemini_api_key` 只写 API key 本身，不要写 `GEMINI_API_KEY=`。然后在
+`config.yaml` 中设置：
 
 ```yaml
 metadata:
   llm_normalize_enabled: true
-  llm_model: gpt-4.1-mini
-  llm_api_key_env: OPENAI_API_KEY
+  llm_base_url: https://generativelanguage.googleapis.com/v1beta/openai
+  llm_model: gemini-3.1-flash-lite
+  llm_api_key_file: /run/secrets/gemini_api_key
+  llm_api_key_env: GEMINI_API_KEY
 ```
 
-然后在运行环境中提供对应 API key。不要把密钥写进仓库。
+密钥文件会只读挂载进容器。不要把密钥写进仓库。
 
 ### 4. 启动
 
@@ -124,6 +138,21 @@ ${DATA_ROOT}/inbox
 docker compose exec manga-pipeline manga-pipeline process
 ```
 
+也可以把一个合集目录放入 `inbox`。父目录名会作为系列名，目录下每个一层子项会作为一本书处理：
+
+```text
+inbox/
+  蒼藍鋼鐵戰艦/
+    1.zip
+    2.cbz
+    蒼藍鋼鐵戰艦 第03卷.pdf
+    4/
+      001.jpg
+      002.jpg
+```
+
+其中 `1.zip`、`2.cbz` 这种纯数字文件名会按卷号处理；`4/` 这种直接包含图片的子目录会先打包成单本 CBZ。只处理这一层，不处理 `卷号/章节/图片` 这种多层目录。
+
 查看日志：
 
 ```bash
@@ -143,6 +172,7 @@ docker compose exec manga-pipeline manga-pipeline status
 | `.cbz`, `.zip` | 直接归一化为 CBZ |
 | `.cbr`, `.rar` | 解压后重新打包为 CBZ |
 | `.7z` | 解压后重新打包为 CBZ |
+| `.pdf` | 默认使用 `pdfimages` 抽取内嵌图片，再打包为 CBZ |
 
 输出到 Komga 的文件为：
 
@@ -177,6 +207,15 @@ kobo:
   manga_style: true
   high_quality: true
 
+pdf:
+  enabled: true
+  strategy: extract_first
+  render_fallback: false
+  preserve_original: true
+  dpi: 180
+  image_format: jpg
+  jpeg_quality: 92
+
 metadata:
   default_language: zho
   confidence_auto_accept: 0.4
@@ -184,10 +223,12 @@ metadata:
   bookwalker_tw_min_confidence: 0.65
   bookwalker_tw_max_candidates: 8
   download_bookwalker_covers: true
-  llm_normalize_enabled: false
-  llm_base_url: https://api.openai.com/v1
-  llm_model: ""
-  llm_api_key_env: OPENAI_API_KEY
+  llm_normalize_enabled: true
+  llm_base_url: https://generativelanguage.googleapis.com/v1beta/openai
+  llm_model: gemini-3.1-flash-lite
+  llm_api_key_file: /run/secrets/gemini_api_key
+  llm_api_key_env: GEMINI_API_KEY
+  llm_timeout_seconds: 30
 
 komga:
   base_uri: http://komga:25600
@@ -208,6 +249,8 @@ komga:
 | `manga-pipeline run` | 持续监听 inbox |
 | `manga-pipeline status` | 查看处理状态 |
 | `manga-pipeline retry --id N` | 重试失败任务 |
+| `manga-pipeline rescrape --id N` | 重新刮削已入库记录 |
+| `manga-pipeline rescrape --all` | 重新刮削全库已入库记录 |
 | `manga-pipeline dry-run FILE` | 预览文件名解析结果 |
 
 Docker 中运行示例：
@@ -215,6 +258,24 @@ Docker 中运行示例：
 ```bash
 docker compose exec manga-pipeline manga-pipeline status
 ```
+
+重新刮削示例：
+
+```bash
+# 先预览固定几本，不写数据库和文件
+docker compose exec manga-pipeline manga-pipeline rescrape --id 11 --id 12 --dry-run
+
+# 更新固定几本的数据库、CBZ ComicInfo、KEPUB OPF 和封面 sidecar
+docker compose exec manga-pipeline manga-pipeline rescrape --id 11 --id 12
+
+# 按标题/系列模糊匹配
+docker compose exec manga-pipeline manga-pipeline rescrape --title 三只眼
+
+# 全库重新刮削
+docker compose exec manga-pipeline manga-pipeline rescrape --all
+```
+
+默认只处理状态为 `done` 的已入库记录。`--relocate` 会把已入库的 KEPUB 移动到重新命中的规范系列目录和文件名；不加这个参数时只改元数据，不移动文件。
 
 ## 开发
 
@@ -237,6 +298,8 @@ ruff check src tests
 
 - `data/`、`.env`、`config.yaml`、数据库和日志不会提交到仓库。
 - BookWalker 台湾没有对应条目时，管线会保留文件名解析结果。
+- PDF 默认用 `pdfimages` 直接抽取内嵌图片，避免整页重渲染导致速度慢和体积暴涨。
+- `pdftoppm` 只作为显式启用的渲染 fallback；默认不自动回退。
 - LLM 只做文件名前置规范化，不直接替代 BookWalker 台湾的书籍元数据。
 - 同一个文件内容会按 SHA-256 去重，重复放入不会再次处理。
 

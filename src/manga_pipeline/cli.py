@@ -7,6 +7,7 @@ Commands:
     run      - Watch inbox and process continuously
     status   - Show processing statistics
     retry    - Retry a failed task
+    rescrape - Re-scrape BookWalker metadata for imported books
     dry-run  - Preview processing without execution
 """
 
@@ -335,6 +336,113 @@ def retry(
         )
     finally:
         db.close()
+
+
+@app.command()
+def rescrape(
+    ids: Optional[list[int]] = typer.Option(
+        None,
+        "--id",
+        "-i",
+        help="Record ID to re-scrape. Repeat for multiple books.",
+    ),
+    title: str = typer.Option(
+        "",
+        "--title",
+        "-t",
+        help="Re-scrape imported records whose filename/title/series contains this text.",
+    ),
+    all_records: bool = typer.Option(
+        False,
+        "--all",
+        help="Re-scrape every imported record in the database.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview matches and metadata changes without writing files.",
+    ),
+    relocate: bool = typer.Option(
+        False,
+        "--relocate",
+        help="Move imported KEPUB files into the newly matched series folder/name.",
+    ),
+    include_unfinished: bool = typer.Option(
+        False,
+        "--include-unfinished",
+        help="Include records that are not currently done/imported.",
+    ),
+    no_scan: bool = typer.Option(
+        False,
+        "--no-scan",
+        help="Do not trigger a Komga library scan after updating metadata.",
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to config.yaml"
+    ),
+) -> None:
+    """Re-scrape BookWalker Taiwan metadata for imported records."""
+    from manga_pipeline.database import Database
+    from manga_pipeline.rescrape import rescrape_records, select_records
+
+    if not ids and not title and not all_records:
+        console.print("[red]Choose a scope: --id, --title, or --all[/red]")
+        raise typer.Exit(code=1)
+
+    cfg = _load_and_init(config_file)
+    db = Database(cfg.paths.state / "pipeline.db")
+
+    try:
+        records = select_records(
+            db,
+            ids=ids or [],
+            title=title,
+            all_records=all_records,
+            done_only=not include_unfinished,
+        )
+        if not records:
+            console.print("[dim]No matching records found.[/dim]")
+            return
+
+        console.print(f"[bold]Re-scraping {len(records)} record(s)[/bold]")
+        if dry_run:
+            console.print("[yellow]Dry-run: no files or database rows will be changed.[/yellow]")
+
+        results = rescrape_records(
+            records,
+            cfg,
+            db,
+            dry_run=dry_run,
+            relocate=relocate,
+            trigger_scan=not no_scan,
+        )
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("ID", justify="right")
+        table.add_column("Status", style="cyan")
+        table.add_column("Old")
+        table.add_column("New")
+        table.add_column("Conf", justify="right")
+        table.add_column("Message")
+        for result in results:
+            old_name = _format_rescrape_name(result.old_series, result.old_volume)
+            new_name = _format_rescrape_name(result.new_series, result.new_volume)
+            table.add_row(
+                str(result.record_id),
+                result.status,
+                old_name or result.old_title or result.file_name,
+                new_name or result.new_title,
+                f"{result.confidence:.2f}" if result.confidence else "",
+                result.message,
+            )
+        console.print(table)
+    finally:
+        db.close()
+
+
+def _format_rescrape_name(series: str, volume: str) -> str:
+    if series and volume:
+        return f"{series} v{volume}"
+    return series
 
 
 @app.command(name="dry-run")

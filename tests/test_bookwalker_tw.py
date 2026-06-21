@@ -5,7 +5,12 @@ from __future__ import annotations
 import html
 import json
 
-from manga_pipeline.bookwalker_tw import parse_product_detail, parse_search_candidates
+from manga_pipeline.bookwalker_tw import (
+    _build_queries,
+    _clean,
+    parse_product_detail,
+    parse_search_candidates,
+)
 
 
 def test_parse_search_candidates_from_bwlayer() -> None:
@@ -91,3 +96,15 @@ window.bwLayer.push({{"productPageData":{{"type":"product","value":{{
     assert metadata.page_count == "192"
     assert "奇幻" in metadata.tags
     assert "冒險" in metadata.tags
+
+
+def test_build_queries_prefers_taiwan_traditional_volume_variants() -> None:
+    queries = _build_queries("三只眼 典藏版", "2")
+
+    assert "三隻眼 典藏版 2" in queries
+    assert "三隻眼 典藏版 02" in queries
+    assert "三隻眼 典藏版" in queries
+
+
+def test_clean_removes_bookwalker_control_escape() -> None:
+    assert _clean("x000B x000B ☆作品簡介") == "☆作品簡介"

@@ -41,6 +41,7 @@ class MangaRecord:
     series: str = ""
     volume: str = ""
     publisher: str = ""
+    collection_title: str = ""
     summary: str = ""
     cover_url: str = ""
     source_url: str = ""
@@ -65,4 +66,5 @@ SUPPORTED_EXTENSIONS: set[str] = {
     ".zip", ".cbz",
     ".rar", ".cbr",
     ".7z",
+    ".pdf",
 }

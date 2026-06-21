@@ -18,6 +18,16 @@ kobo:
   manga_style: true        # 日漫模式（右→左）
   high_quality: true       # 高质量转换
 
+# PDF 转图片参数
+pdf:
+  enabled: true             # 允许 .pdf 输入
+  strategy: extract_first   # 优先直接抽取 PDF 内嵌图片，避免整页重渲染
+  render_fallback: false    # 抽取失败时不自动回退到慢速渲染
+  preserve_original: true   # 归档原 PDF，避免 inbox 清理后丢原文件
+  dpi: 180                  # strategy=render 或启用 fallback 时使用
+  image_format: jpg         # strategy=render 时使用：jpg 或 png
+  jpeg_quality: 92          # strategy=render 且 image_format=jpg 时生效
+
 # 元数据默认值
 metadata:
   default_language: zho    # 中文（中文翻译版日漫）
@@ -27,9 +37,10 @@ metadata:
   bookwalker_tw_max_candidates: 8
   download_bookwalker_covers: true
   llm_normalize_enabled: false  # 可选：用 LLM 从文件名补齐标题/作者/出版社
-  llm_base_url: https://api.openai.com/v1
-  llm_model: ""
-  llm_api_key_env: OPENAI_API_KEY
+  llm_base_url: https://generativelanguage.googleapis.com/v1beta/openai
+  llm_model: gemini-3.1-flash-lite
+  llm_api_key_file: /run/secrets/gemini_api_key
+  llm_api_key_env: GEMINI_API_KEY
   llm_timeout_seconds: 30
   default_tags:
     - manga
@@ -39,6 +50,8 @@ metadata:
 # 外部命令路径
 commands:
   kcc: kcc-c2e             # KCC 命令行工具
+  pdfimages: pdfimages     # poppler-utils 提供的 PDF 图片抽取工具
+  pdftoppm: pdftoppm       # poppler-utils 提供的 PDF 渲染工具
 
 # Komga 扫描触发配置
 komga:

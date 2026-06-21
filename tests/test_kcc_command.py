@@ -1,10 +1,16 @@
 """Tests for KCC command construction."""
 
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from manga_pipeline.config import KoboConfig
-from manga_pipeline.kcc import _ensure_kepub_extension, build_kcc_command, run_kcc
+from manga_pipeline.kcc import (
+    _ensure_kepub_extension,
+    _find_output_file,
+    build_kcc_command,
+    run_kcc,
+)
 
 
 class TestBuildKccCommand:
@@ -155,3 +161,39 @@ class TestRunKcc:
         assert result == str(tmp_path / "manga.kepub.epub")
         assert not epub.exists()
         assert (tmp_path / "manga.kepub.epub").is_file()
+
+    def test_find_output_file_does_not_use_unrelated_epub(self, tmp_path: Path) -> None:
+        """Stale outputs from other books must not be reused."""
+        source = tmp_path / "manga.cbz"
+        source.write_bytes(b"data")
+        unrelated = tmp_path / "other.epub"
+        unrelated.write_bytes(b"stale")
+
+        assert _find_output_file(tmp_path, source) == ""
+
+    @patch("manga_pipeline.kcc.subprocess.run")
+    def test_truncated_output_is_rejected(
+        self,
+        mock_run: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """KCC outputs with fewer images than source should not be imported."""
+        source = tmp_path / "manga.cbz"
+        output = tmp_path / "manga.epub"
+        with zipfile.ZipFile(source, "w") as zf:
+            zf.writestr("001.jpg", b"1")
+            zf.writestr("002.jpg", b"2")
+            zf.writestr("003.jpg", b"3")
+
+        def fake_run(*args: object, **kwargs: object) -> MagicMock:
+            with zipfile.ZipFile(output, "w") as zf:
+                zf.writestr("OEBPS/Images/001.jpg", b"1")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = fake_run
+
+        result = run_kcc(source, tmp_path)
+
+        assert result.success is False
+        assert "fewer image pages" in result.stderr
+        assert not (tmp_path / "manga.kepub.epub").exists()

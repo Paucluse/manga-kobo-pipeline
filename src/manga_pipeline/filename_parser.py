@@ -65,6 +65,8 @@ VOLUME_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"v[._\-\s]?(\d+)", re.IGNORECASE), "v"),
     # vol.01, vol 01, Vol_01
     (re.compile(r"vol[._\-\s]*(\d+)", re.IGNORECASE), "vol"),
+    # Pure number: 01.cbz or a book directory named 01
+    (re.compile(r"^(\d{1,3})$"), "number"),
     # Trailing number: title 01.cbz, title 001.cbz
     (re.compile(r"\s(\d{1,3})$"), "bare"),
 ]
@@ -109,8 +111,18 @@ def parse_filename(filename: str) -> ParseResult:
     title_candidate = re.sub(r"[\s_\-]+$", "", title_candidate)
     title_candidate = re.sub(r"^[\s_\-]+", "", title_candidate)
 
+    loose_parts = _split_loose_bracket_tail(title_candidate)
+    if loose_parts and not brackets:
+        result.title = loose_parts[0]
+        if len(loose_parts) >= 2:
+            result.author = loose_parts[1]
+        if len(loose_parts) >= 3:
+            result.publisher = loose_parts[2]
+        confidence_parts.append(0.3)
+        if result.author:
+            confidence_parts.append(0.2)
     # --- Heuristics to assign Title, Author, Publisher ---
-    if not title_candidate:
+    elif not title_candidate:
         # Title was inside the brackets! e.g., [Title][Author][Publisher] vol1.cbz
         if len(brackets) >= 4:
             result.title = brackets[1]
@@ -160,7 +172,7 @@ def _strip_extension(filename: str) -> str:
     """Remove manga file extensions."""
     extensions = [
         ".cbz", ".cbr", ".zip", ".rar", ".7z",
-        ".epub", ".kepub", ".kepub.epub",
+        ".pdf", ".epub", ".kepub", ".kepub.epub",
     ]
     lower = filename.lower()
     for ext in sorted(extensions, key=len, reverse=True):
@@ -187,3 +199,15 @@ def _extract_volume(
             return vol_num, ptype, remaining
 
     return "", "", name
+
+
+def _split_loose_bracket_tail(value: str) -> list[str]:
+    """Parse names like 'Title][Author][Publisher' from a missing leading '['."""
+    if "][" not in value or value.startswith("["):
+        return []
+    parts = [
+        part.strip("[] \t")
+        for part in value.split("][")
+        if part.strip("[] \t")
+    ]
+    return parts if len(parts) >= 2 else []

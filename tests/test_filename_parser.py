@@ -209,6 +209,28 @@ class TestEdgeCases:
         assert result.publisher == "天下"
         assert result.volume == "1"
 
+    def test_pdf_multi_bracket_release(self) -> None:
+        """PDF extension should be stripped before volume parsing."""
+        result = parse_filename("[3x3EYES完全版][高田裕三][玉皇朝]Vol.01.pdf")
+        assert result.title == "3x3EYES完全版"
+        assert result.author == "高田裕三"
+        assert result.publisher == "玉皇朝"
+        assert result.volume == "1"
+
+    def test_missing_leading_bracket_release(self) -> None:
+        """Title][Author][Publisher]Vol_XX should recover bracket fields."""
+        result = parse_filename("三只眼 典藏版][高田裕三][玉皇朝]Vol.02.pdf")
+        assert result.title == "三只眼 典藏版"
+        assert result.author == "高田裕三"
+        assert result.publisher == "玉皇朝"
+        assert result.volume == "2"
+
+    def test_plain_number_is_volume(self) -> None:
+        """Collection child names like 2.zip should parse as volume 2."""
+        result = parse_filename("02.zip")
+        assert result.title == ""
+        assert result.volume == "2"
+
 
 class TestConfidence:
     """Test confidence scoring."""

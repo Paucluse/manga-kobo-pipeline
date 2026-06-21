@@ -1,9 +1,13 @@
 """Tests for normalizer, review, comicinfo, and scanner modules."""
 
+import subprocess
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from manga_pipeline.comicinfo import generate_comicinfo_xml, write_comicinfo_to_cbz
+from manga_pipeline.config import PdfConfig
 from manga_pipeline.database import Database
 from manga_pipeline.models import ProcessingStatus
 from manga_pipeline.normalizer import normalize_to_cbz
@@ -60,13 +64,156 @@ class TestNormalizeCbz:
 
     def test_unsupported_format_raises(self, tmp_path: Path) -> None:
         """Should raise ValueError for unsupported formats."""
-        import pytest
-
-        src = tmp_path / "file.pdf"
-        src.write_bytes(b"fake pdf")
+        src = tmp_path / "file.txt"
+        src.write_bytes(b"not manga")
 
         with pytest.raises(ValueError, match="Unsupported"):
             normalize_to_cbz(src, tmp_path / "out")
+
+    def test_extract_pdf_images_to_cbz(
+        self,
+        tmp_path: Path,
+        monkeypatch: object,
+    ) -> None:
+        """PDF files should be extracted with pdfimages by default."""
+        src = tmp_path / "input" / "manga.pdf"
+        src.parent.mkdir()
+        src.write_bytes(b"%PDF fake")
+        commands: list[list[str]] = []
+
+        def fake_run(
+            command: list[str],
+            capture_output: bool,
+            text: bool,
+            check: bool,
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            if command[1] == "-list":
+                stdout = "\n".join(
+                    [
+                        "page   num  type   width height color comp bpc  enc interp object ID",
+                        "1      0    image  1200  1800   rgb   3    8    jpeg no     10 0",
+                        "1      1    image  120   180    rgb   3    8    image no    12 0",
+                        "2      0    image  1200  1800   rgb   3    8    jpeg no     11 0",
+                    ]
+                )
+                return subprocess.CompletedProcess(command, 0, stdout, "")
+
+            prefix = Path(command[-1])
+            (prefix.parent / "image-001-000.jpg").write_bytes(b"page 1")
+            (prefix.parent / "image-001-001.png").write_bytes(b"thumbnail")
+            (prefix.parent / "image-002-000.jpg").write_bytes(b"page 2")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("manga_pipeline.normalizer.subprocess.run", fake_run)
+
+        result = normalize_to_cbz(
+            src,
+            tmp_path / "archive",
+            pdf_config=PdfConfig(strategy="extract_first"),
+            pdfimages_cmd="pdfimages",
+        )
+
+        assert result.name == "manga.cbz"
+        assert commands[0] == ["pdfimages", "-list", str(src)]
+        assert commands[1][:4] == ["pdfimages", "-j", "-png", "-p"]
+        assert commands[1][-2] == str(src)
+        assert result.with_suffix(".source.pdf").is_file()
+        with zipfile.ZipFile(result) as zf:
+            assert zf.namelist() == ["0001.jpg", "0002.jpg"]
+            assert zf.read("0001.jpg") == b"page 1"
+            assert zf.read("0002.jpg") == b"page 2"
+
+    def test_pdf_extract_without_fallback_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: object,
+    ) -> None:
+        """PDF extraction failure should not render unless fallback is enabled."""
+        src = tmp_path / "input" / "manga.pdf"
+        src.parent.mkdir()
+        src.write_bytes(b"%PDF fake")
+        commands: list[list[str]] = []
+
+        def fake_run(
+            command: list[str],
+            capture_output: bool,
+            text: bool,
+            check: bool,
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("manga_pipeline.normalizer.subprocess.run", fake_run)
+
+        with pytest.raises(ValueError, match="no extractable"):
+            normalize_to_cbz(
+                src,
+                tmp_path / "archive",
+                pdf_config=PdfConfig(strategy="extract_first", render_fallback=False),
+            )
+
+        assert commands == [["pdfimages", "-list", str(src)]]
+
+    def test_rasterize_pdf_to_cbz(self, tmp_path: Path, monkeypatch: object) -> None:
+        """PDF files can still be rasterized with pdftoppm when requested."""
+        src = tmp_path / "input" / "manga.pdf"
+        src.parent.mkdir()
+        src.write_bytes(b"%PDF fake")
+        commands: list[list[str]] = []
+
+        def fake_run(
+            command: list[str],
+            capture_output: bool,
+            text: bool,
+            check: bool,
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            prefix = Path(command[-1])
+            (prefix.parent / "page-2.jpg").write_bytes(b"page 2")
+            (prefix.parent / "page-1.jpg").write_bytes(b"page 1")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("manga_pipeline.normalizer.subprocess.run", fake_run)
+
+        result = normalize_to_cbz(
+            src,
+            tmp_path / "archive",
+            pdf_config=PdfConfig(
+                strategy="render",
+                dpi=180,
+                image_format="jpg",
+                jpeg_quality=92,
+            ),
+            pdftoppm_cmd="pdftoppm",
+        )
+
+        assert result.name == "manga.cbz"
+        assert commands[0][:6] == [
+            "pdftoppm",
+            "-r",
+            "180",
+            "-jpeg",
+            "-jpegopt",
+            "quality=92,progressive=n,optimize=y",
+        ]
+        assert commands[0][-2] == str(src)
+        with zipfile.ZipFile(result) as zf:
+            assert zf.namelist() == ["0001.jpg", "0002.jpg"]
+            assert zf.read("0001.jpg") == b"page 1"
+            assert zf.read("0002.jpg") == b"page 2"
+
+    def test_pdf_disabled_raises(self, tmp_path: Path) -> None:
+        """PDF support should be configurable."""
+        src = tmp_path / "manga.pdf"
+        src.write_bytes(b"%PDF fake")
+
+        with pytest.raises(ValueError, match="disabled"):
+            normalize_to_cbz(
+                src,
+                tmp_path / "archive",
+                pdf_config=PdfConfig(enabled=False),
+            )
 
     def test_pack_directory(self, tmp_path: Path) -> None:
         """Should pack image directory as CBZ."""
@@ -216,15 +363,17 @@ class TestScannerIntegration:
         inbox.mkdir()
         (inbox / "manga1.cbz").write_bytes(b"data1")
         (inbox / "manga2.zip").write_bytes(b"data2")
+        (inbox / "manga3.pdf").write_bytes(b"data3")
         (inbox / "readme.txt").write_bytes(b"not manga")
 
         db = Database(tmp_path / "state" / "test.db")
         discovered = scan_inbox(inbox, db)
 
-        assert len(discovered) == 2
+        assert len(discovered) == 3
         names = {r.file_name for r in discovered}
         assert "manga1.cbz" in names
         assert "manga2.zip" in names
+        assert "manga3.pdf" in names
         db.close()
 
     def test_scan_idempotent(self, tmp_path: Path) -> None:
@@ -286,4 +435,42 @@ class TestScannerIntegration:
         discovered = scan_inbox(inbox, db)
 
         assert len(discovered[0].file_hash) == 64  # SHA-256 hex
+        db.close()
+
+    def test_scan_expands_collection_directory(self, tmp_path: Path) -> None:
+        """A top-level directory should be treated as a manga collection."""
+        inbox = tmp_path / "inbox"
+        series_dir = inbox / "苍蓝钢铁战舰"
+        volume_dir = series_dir / "4"
+        volume_dir.mkdir(parents=True)
+        (series_dir / "2.zip").write_bytes(b"volume 2")
+        (series_dir / "苍蓝钢铁战舰 第03卷.cbz").write_bytes(b"volume 3")
+        (volume_dir / "001.jpg").write_bytes(b"page 1")
+        (volume_dir / "002.jpg").write_bytes(b"page 2")
+
+        db = Database(tmp_path / "state" / "test.db")
+        discovered = scan_inbox(inbox, db)
+
+        assert len(discovered) == 3
+        by_name = {record.file_name: record for record in discovered}
+        assert by_name["2.zip"].collection_title == "苍蓝钢铁战舰"
+        assert by_name["苍蓝钢铁战舰 第03卷.cbz"].collection_title == "苍蓝钢铁战舰"
+        assert by_name["4"].collection_title == "苍蓝钢铁战舰"
+        assert by_name["4"].original_path.endswith("/苍蓝钢铁战舰/4")
+        db.close()
+
+    def test_scan_collection_directory_ignores_nested_chapter_dirs(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Only one level is supported; nested chapter directories are skipped."""
+        inbox = tmp_path / "inbox"
+        nested = inbox / "苍蓝钢铁战舰" / "5" / "chapter1"
+        nested.mkdir(parents=True)
+        (nested / "001.jpg").write_bytes(b"page")
+
+        db = Database(tmp_path / "state" / "test.db")
+        discovered = scan_inbox(inbox, db)
+
+        assert discovered == []
         db.close()

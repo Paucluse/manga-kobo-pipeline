@@ -22,6 +22,7 @@ dependencies = [
     "rich>=13,<15",
     "rarfile>=4,<5",
     "requests>=2,<3",
+    "opencc-python-reimplemented>=0.1.7,<1",
 ]
 
 [project.optional-dependencies]

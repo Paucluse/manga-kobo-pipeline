@@ -36,6 +36,18 @@ class KoboConfig(BaseModel):
     high_quality: bool = True
 
 
+class PdfConfig(BaseModel):
+    """PDF extraction/rasterization settings."""
+
+    enabled: bool = True
+    strategy: str = "extract_first"
+    render_fallback: bool = False
+    preserve_original: bool = True
+    dpi: int = 180
+    image_format: str = "jpg"
+    jpeg_quality: int = 92
+
+
 class MetadataConfig(BaseModel):
     """Metadata defaults for imported manga."""
 
@@ -51,6 +63,7 @@ class MetadataConfig(BaseModel):
     llm_normalize_enabled: bool = False
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = ""
+    llm_api_key_file: Path | None = None
     llm_api_key_env: str = "OPENAI_API_KEY"
     llm_timeout_seconds: int = 30
 
@@ -59,6 +72,8 @@ class CommandsConfig(BaseModel):
     """External command paths."""
 
     kcc: str = "kcc-c2e"
+    pdfimages: str = "pdfimages"
+    pdftoppm: str = "pdftoppm"
 
 
 class KomgaServerConfig(BaseModel):
@@ -92,6 +107,7 @@ class PipelineConfig(BaseModel):
 
     paths: PathsConfig = Field(default_factory=PathsConfig)
     kobo: KoboConfig = Field(default_factory=KoboConfig)
+    pdf: PdfConfig = Field(default_factory=PdfConfig)
     metadata: MetadataConfig = Field(default_factory=MetadataConfig)
     commands: CommandsConfig = Field(default_factory=CommandsConfig)
     komga: KomgaServerConfig = Field(default_factory=KomgaServerConfig)

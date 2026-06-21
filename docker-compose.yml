@@ -7,6 +7,8 @@ services:
     volumes:
       # 配置文件（只读挂载）
       - ./config.yaml:/app/config.yaml:ro
+      # LLM API key（只读挂载；文件内容只放 key 本身）
+      - ./secrets/gemini_api_key:/run/secrets/gemini_api_key:ro
       # 数据目录 —— 修改 .env 中的 DATA_ROOT 可统一切换路径
       - ${DATA_ROOT:-/srv/ebooks}/inbox:/data/inbox
       - ${DATA_ROOT:-/srv/ebooks}/processing:/data/processing

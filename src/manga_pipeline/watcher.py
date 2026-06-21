@@ -34,21 +34,18 @@ class MangaFileHandler(FileSystemEventHandler):
         self.wake_up_event = wake_up_event
 
     def on_created(self, event: FileCreatedEvent) -> None:
-        if not event.is_directory:
-            self._trigger(event.src_path)
+        self._trigger(event.src_path, event.is_directory)
 
     def on_moved(self, event: FileMovedEvent) -> None:
-        if not event.is_directory:
-            # For XFTP and other tools that rename temp files to final files
-            self._trigger(event.dest_path)
+        # For XFTP and other tools that rename temp files/directories to final paths
+        self._trigger(event.dest_path, event.is_directory)
 
     def on_modified(self, event: FileModifiedEvent) -> None:
-        if not event.is_directory:
-            self._trigger(event.src_path)
+        self._trigger(event.src_path, event.is_directory)
 
-    def _trigger(self, path: str) -> None:
+    def _trigger(self, path: str, is_directory: bool) -> None:
         """Trigger the wake up event if the file is a supported manga file."""
-        if Path(path).suffix.lower() in SUPPORTED_EXTENSIONS:
+        if is_directory or Path(path).suffix.lower() in SUPPORTED_EXTENSIONS:
             self.wake_up_event.set()
 
 

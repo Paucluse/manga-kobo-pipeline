@@ -7,6 +7,7 @@ to Kobo Sage compatible KEPUB/EPUB format.
 from __future__ import annotations
 
 import subprocess
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -91,6 +92,7 @@ def run_kcc(
     """
     cmd = build_kcc_command(input_path, output_dir, kcc_cmd, kobo_config)
     logger.info("Running KCC: %s", " ".join(cmd))
+    _remove_stale_outputs(output_dir, input_path)
 
     try:
         result = subprocess.run(
@@ -105,6 +107,16 @@ def run_kcc(
             output_path = _find_output_file(output_dir, input_path)
             if output_path and kobo_config and kobo_config.format.upper() == "KEPUB":
                 output_path = _ensure_kepub_extension(Path(output_path))
+            if output_path and not _output_has_expected_pages(input_path, Path(output_path)):
+                Path(output_path).unlink(missing_ok=True)
+                msg = "KCC output has fewer image pages than the source archive"
+                logger.error("%s: %s", msg, input_path)
+                return KccResult(
+                    success=False,
+                    stdout=result.stdout,
+                    stderr=msg,
+                    return_code=1,
+                )
             logger.info("KCC conversion successful: %s", output_path)
             return KccResult(
                 success=True,
@@ -114,6 +126,7 @@ def run_kcc(
                 return_code=result.returncode,
             )
         else:
+            _remove_stale_outputs(output_dir, input_path)
             logger.error(
                 "KCC failed (rc=%d): %s",
                 result.returncode,
@@ -155,15 +168,6 @@ def _find_output_file(output_dir: Path, input_path: Path) -> str:
         if candidate.is_file():
             return str(candidate)
 
-    # Fallback: find any recently created epub in output dir
-    epubs = sorted(
-        output_dir.glob("*.epub"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if epubs:
-        return str(epubs[0])
-
     return ""
 
 
@@ -183,3 +187,32 @@ def _ensure_kepub_extension(output_path: Path) -> str:
         target.unlink()
     output_path.rename(target)
     return str(target)
+
+
+def _remove_stale_outputs(output_dir: Path, input_path: Path) -> None:
+    """Remove exact output paths before/after conversion to avoid stale imports."""
+    stem = input_path.stem
+    for ext in [".kepub.epub", ".epub"]:
+        (output_dir / f"{stem}{ext}").unlink(missing_ok=True)
+
+
+def _output_has_expected_pages(input_path: Path, output_path: Path) -> bool:
+    """Sanity-check KCC did not leave a truncated EPUB behind."""
+    source_images = _count_zip_images(input_path)
+    output_images = _count_zip_images(output_path)
+    if source_images == 0 or output_images == 0:
+        return True
+    return output_images >= source_images
+
+
+def _count_zip_images(path: Path) -> int:
+    image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return sum(
+                1
+                for name in zf.namelist()
+                if Path(name).suffix.lower() in image_exts
+            )
+    except (OSError, zipfile.BadZipFile):
+        return 0

@@ -7,6 +7,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -69,19 +70,27 @@ def search_bookwalker_tw(
     max_candidates: int = 8,
 ) -> BookwalkerMetadata | None:
     """Search BookWalker Taiwan and return the best matching metadata."""
-    query = _build_query(title, volume)
-    html_text = _request_get(SEARCH_URL.format(query=quote_plus(query)), timeout=timeout)
-    candidates = parse_search_candidates(html_text)
+    query_title = to_bookwalker_traditional(title)
+    candidates_by_id: dict[str, SearchCandidate] = {}
+    queries = _build_queries(title, volume)
+    for query in queries:
+        html_text = _request_get(SEARCH_URL.format(query=quote_plus(query)), timeout=timeout)
+        for candidate in parse_search_candidates(html_text):
+            existing = candidates_by_id.get(candidate.product_id)
+            if existing is None or candidate.index < existing.index:
+                candidates_by_id[candidate.product_id] = candidate
+
+    candidates = list(candidates_by_id.values())
     if not candidates:
-        logger.info("BookWalker TW found no search candidates for query=%s", query)
+        logger.info("BookWalker TW found no search candidates for queries=%s", queries)
         return None
 
     ranked = sorted(
         candidates,
-        key=lambda c: _score_candidate(c, title, volume),
+        key=lambda c: _score_candidate(c, query_title, volume),
         reverse=True,
     )
-    dominant_series = _dominant_search_series(candidates, title)
+    dominant_series = _dominant_search_series(candidates, query_title)
 
     best: BookwalkerMetadata | None = None
     for candidate in ranked[:max_candidates]:
@@ -91,12 +100,29 @@ def search_bookwalker_tw(
             logger.warning("BookWalker TW detail fetch failed for %s: %s", candidate.product_id, e)
             continue
 
-        score = _score_metadata(metadata, title, volume, author, dominant_series)
+        score = _score_metadata(
+            metadata,
+            query_title,
+            volume,
+            to_bookwalker_traditional(author),
+            dominant_series,
+        )
         metadata.confidence = min(score / 100, 1.0)
         if best is None or metadata.confidence > best.confidence:
             best = metadata
 
     return best
+
+
+def to_bookwalker_traditional(value: str) -> str:
+    """Convert Chinese query text to Taiwan traditional Chinese when available."""
+    value = _clean(value)
+    if not value:
+        return ""
+    try:
+        return _opencc_s2twp().convert(value)
+    except Exception:
+        return _fallback_simplified_to_traditional(value)
 
 
 def fetch_product_metadata(product_id: str, timeout: int = 15) -> BookwalkerMetadata:
@@ -303,9 +329,40 @@ def _as_text_list(value: Any) -> list[str]:
     return [text] if text else []
 
 
+def _build_queries(title: str, volume: str) -> list[str]:
+    """Return BookWalker search query variants, preferring Taiwan traditional."""
+    titles = [
+        _series_from_title(to_bookwalker_traditional(title)),
+        _series_from_title(title),
+    ]
+    volume_values = _volume_query_values(volume)
+    queries: list[str] = []
+
+    for current_title in titles:
+        if not current_title:
+            continue
+        for current_volume in volume_values:
+            query = f"{current_title} {current_volume}" if current_volume else current_title
+            if query not in queries:
+                queries.append(query)
+
+    return queries
+
+
 def _build_query(title: str, volume: str) -> str:
-    title = _series_from_title(title)
-    return f"{title} {int(volume)}" if volume.isdigit() else title
+    """Build the primary BookWalker search query."""
+    return _build_queries(title, volume)[0]
+
+
+def _volume_query_values(volume: str) -> list[str]:
+    if not volume.isdigit():
+        return [""]
+    value = str(int(volume))
+    values = [value]
+    if int(volume) < 100:
+        values.append(f"{int(volume):02d}")
+    values.append("")
+    return values
 
 
 def _score_candidate(candidate: SearchCandidate, title: str, volume: str) -> int:
@@ -401,4 +458,40 @@ def _normalized(value: str) -> str:
 def _clean(value: Any) -> str:
     if value is None:
         return ""
-    return html.unescape(str(value)).strip()
+    text = html.unescape(str(value))
+    text = re.sub(r"\\?x000[Bb]", " ", text)
+    text = "".join(" " if unicodedata.category(ch)[0] == "C" else ch for ch in text)
+    return " ".join(text.split())
+
+
+@lru_cache(maxsize=1)
+def _opencc_s2twp() -> Any:
+    from opencc import OpenCC
+
+    return OpenCC("s2twp")
+
+
+def _fallback_simplified_to_traditional(value: str) -> str:
+    """Small fallback for environments missing OpenCC."""
+    return value.translate(
+        str.maketrans(
+            {
+                "只": "隻",
+                "苍": "蒼",
+                "蓝": "藍",
+                "钢": "鋼",
+                "铁": "鐵",
+                "战": "戰",
+                "舰": "艦",
+                "风": "風",
+                "龙": "龍",
+                "爱": "愛",
+                "国": "國",
+                "东": "東",
+                "万": "萬",
+                "与": "與",
+                "书": "書",
+                "画": "畫",
+            }
+        )
+    )

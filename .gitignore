@@ -18,6 +18,9 @@ venv/
 # Project
 config.yaml
 .env
+secrets/*
+!secrets/
+!secrets/README.md
 data/
 *.db
 *.sqlite

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS manga_records (
     series TEXT DEFAULT '',
     volume TEXT DEFAULT '',
     publisher TEXT DEFAULT '',
+    collection_title TEXT DEFAULT '',
     summary TEXT DEFAULT '',
     cover_url TEXT DEFAULT '',
     source_url TEXT DEFAULT '',
@@ -66,6 +67,7 @@ class Database:
         # Migrate schema if needed
         for migration in [
             "ALTER TABLE manga_records ADD COLUMN publisher TEXT DEFAULT ''",
+            "ALTER TABLE manga_records ADD COLUMN collection_title TEXT DEFAULT ''",
             "ALTER TABLE manga_records ADD COLUMN summary TEXT DEFAULT ''",
             "ALTER TABLE manga_records ADD COLUMN cover_url TEXT DEFAULT ''",
             "ALTER TABLE manga_records ADD COLUMN source_url TEXT DEFAULT ''",
@@ -97,11 +99,11 @@ class Database:
             """
             INSERT INTO manga_records (
                 original_path, file_name, file_hash, current_status,
-                title, author, series, volume, publisher,
+                title, author, series, volume, publisher, collection_title,
                 summary, cover_url, source_url, isbn, page_count, confidence,
                 archive_path, converted_path, library_book_id,
                 error_message, retry_count, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.original_path,
@@ -113,6 +115,7 @@ class Database:
                 record.series,
                 record.volume,
                 record.publisher,
+                record.collection_title,
                 record.summary,
                 record.cover_url,
                 record.source_url,
@@ -232,6 +235,7 @@ class Database:
             series=row["series"],
             volume=row["volume"],
             publisher=row["publisher"],
+            collection_title=row["collection_title"],
             summary=row["summary"],
             cover_url=row["cover_url"],
             source_url=row["source_url"],

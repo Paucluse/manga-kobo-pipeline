@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Archive tools
     p7zip-full \
     unrar-free \
+    # PDF rasterization
+    poppler-utils \
     # Calibre CLI (calibredb)
     calibre \
     # KCC dependencies
