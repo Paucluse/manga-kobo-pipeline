@@ -25,6 +25,8 @@ from manga_pipeline.pipeline import (
 THREE_BY_THREE_EYES = "3" + "\N{MULTIPLICATION SIGN}" + "3EYES"
 FW_TILDE = "\N{FULLWIDTH TILDE}"
 FW_DOT = "\N{FULLWIDTH FULL STOP}"
+FW_LPAREN = "\N{FULLWIDTH LEFT PARENTHESIS}"
+FW_RPAREN = "\N{FULLWIDTH RIGHT PARENTHESIS}"
 DNA2_JP_SERIES = f"D・N・A2 {FW_TILDE}何処かで失くしたあいつのアイツ{FW_TILDE}"
 DNA2_JP_V3 = f"{DNA2_JP_SERIES} 3"
 GUNDAM_TW_TITLE = f"機動戰士鋼彈 光輝的阿{FW_DOT}巴瓦{FW_DOT}空"
@@ -170,6 +172,19 @@ def test_prompt_console_schema_adds_bookwalker_jp_search_title() -> None:
     titles = _metadata_search_titles(parsed, record, llm, "jp")
 
     assert titles[0] == GUNDAM_JP_TITLE
+
+
+def test_gunnm_collection_adds_bookwalker_jp_publisher_search_title() -> None:
+    record = MangaRecord(
+        file_name="[銃夢(第一部)[木城ゆきと][東立]Vol_01.rar",
+        collection_title="[木城ゆきと_木城幸人][銃夢][東立][9完]",
+    )
+    parsed = parse_filename(record.file_name)
+    _apply_collection_title(parsed, record.collection_title)
+
+    titles = _metadata_search_titles(parsed, record, None, "jp")
+
+    assert f"銃夢{FW_LPAREN}講談社{FW_RPAREN}" in titles
 
 
 def test_llm_result_is_not_overridden_by_collection_title(

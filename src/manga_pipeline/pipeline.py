@@ -537,6 +537,13 @@ def _metadata_title_aliases(title: str, provider: str) -> list[str]:
             "何処かで失くしたあいつのアイツ"
             "\N{FULLWIDTH TILDE}"
         )
+    if provider != "tw" and key == "銃夢":
+        aliases.append(
+            "銃夢"
+            "\N{FULLWIDTH LEFT PARENTHESIS}"
+            "講談社"
+            "\N{FULLWIDTH RIGHT PARENTHESIS}"
+        )
     return aliases
 
 
