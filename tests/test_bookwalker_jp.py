@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from manga_pipeline.bookwalker_jp import (
+    _titles_match,
     parse_product_detail,
     parse_search_candidates,
     parse_series_candidates,
@@ -16,6 +17,12 @@ FW_RPAREN = "\N{FULLWIDTH RIGHT PARENTHESIS}"
 DNA2_SERIES = f"D・N・A2 {FW_TILDE}何処かで失くしたあいつのアイツ{FW_TILDE}"
 DNA2_SERIES_WITH_LABEL = f"{DNA2_SERIES}{FW_LPAREN}ジャンプコミックスDIGITAL{FW_RPAREN}"
 DNA2_V3 = f"{DNA2_SERIES} 3"
+
+
+def test_titles_match_rejects_short_title_substring_false_positive() -> None:
+    assert _titles_match("銃夢", "銃夢")
+    assert not _titles_match("木城ゆきと画集 ARS MAGNA デビューから銃夢火星戦記まで", "銃夢")
+    assert not _titles_match("銃夢火星戦記", "銃夢")
 
 
 def test_parse_search_candidates_reads_series_card() -> None:

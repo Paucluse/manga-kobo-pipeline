@@ -395,7 +395,11 @@ def _product_id_from_url(url: str) -> str:
 def _titles_match(candidate: str, expected: str) -> bool:
     c = _normalized(_series_from_title(candidate))
     e = _normalized(_series_from_title(expected))
-    return bool(c and e and (c in e or e in c))
+    if not c or not e:
+        return False
+    if c == e:
+        return True
+    return len(e) >= 4 and (c.startswith(e) or e.startswith(c))
 
 
 def _extract_volume_from_title(title: str) -> str:

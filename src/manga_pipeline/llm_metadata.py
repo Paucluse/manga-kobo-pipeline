@@ -53,12 +53,12 @@ def normalize_with_llm(
         )
         return None
 
-    system_prompt = prompt_template or (
+    system_prompt = (prompt_template or (
         "你是漫画电子书文件名标准化器。只输出 JSON, 不要解释。"
         "你的任务是从可能不准确的文件名推断正式书名和检索关键词。"
         "优先给出台版正式书名; 如台版可能不存在, 同时给出日版正式书名。"
         "不要编造出版社; 不确定则留空。"
-    )
+    )).replace("{{RAW_FILENAME}}", filename)
     payload = {
         "model": cfg.llm_model,
         "temperature": 0,
@@ -79,15 +79,26 @@ def normalize_with_llm(
                             "volume": parsed.volume,
                         },
                         "output_schema": {
-                            "title": "最适合归档的系列名, 优先台版正式名, 否则日版正式名",
-                            "title_tw": "BookWalker 台湾可能使用的正式系列名",
-                            "title_jp": "BookWalker 日本可能使用的正式系列名",
-                            "search_titles": [
-                                "用于台湾 BookWalker、日本 BookWalker、Bangumi 检索的标题候选",
-                            ],
-                            "author": "作者名",
-                            "publisher": "台湾出版社, 未知则空字符串",
-                            "volume": "阿拉伯数字卷号, 未知则空字符串",
+                            "clean_title": "从文件名清理出的系列名",
+                            "volume_number": "阿拉伯数字卷号, 未知则 null",
+                            "titles": {
+                                "traditional_chinese": "繁体中文正式名或常用译名",
+                                "simplified_chinese": "简体中文名",
+                                "japanese": "日文正式名",
+                                "romaji": "罗马字",
+                                "aliases": ["其他可用于检索的别名"],
+                            },
+                            "authors": ["作者名"],
+                            "publisher_hints": ["出版社提示"],
+                            "scraping_queries": {
+                                "bookwalker_tw": ["BookWalker 台湾检索词"],
+                                "bookwalker_jp": ["BookWalker 日本检索词"],
+                                "bangumi": ["Bangumi 检索词"],
+                            },
+                            "verified": "是否经过外部来源验证",
+                            "verification_level": (
+                                "filename_only | search_single_source | search_multi_source"
+                            ),
                             "confidence": "0 到 1 的数字",
                         },
                     },
@@ -163,17 +174,81 @@ def _parse_llm_json(content: str) -> LlmMetadata | None:
     except json.JSONDecodeError:
         return None
 
+    titles = data.get("titles") if isinstance(data.get("titles"), dict) else {}
+    scraping_queries = (
+        data.get("scraping_queries")
+        if isinstance(data.get("scraping_queries"), dict)
+        else {}
+    )
+    title_tw = _first_text(
+        data.get("title_tw"),
+        titles.get("traditional_chinese"),
+    )
+    title_jp = _first_text(data.get("title_jp"), titles.get("japanese"))
+    title = _first_text(
+        data.get("title"),
+        data.get("clean_title"),
+        title_tw,
+        title_jp,
+    )
+    authors = _list_text(data.get("authors"))
+    publishers = _list_text(data.get("publisher_hints"))
+    search_titles = _dedupe_text(
+        _list_text(data.get("search_titles"))
+        + _list_text(scraping_queries.get("bookwalker_tw"))
+        + _list_text(scraping_queries.get("bookwalker_jp"))
+        + _list_text(scraping_queries.get("bangumi"))
+        + _list_text(titles.get("aliases"))
+        + _list_text(
+            [
+                titles.get("traditional_chinese"),
+                titles.get("simplified_chinese"),
+                titles.get("japanese"),
+                titles.get("romaji"),
+            ]
+        )
+    )
+
     return LlmMetadata(
-        title=str(data.get("title") or "").strip(),
-        title_tw=str(data.get("title_tw") or "").strip(),
-        title_jp=str(data.get("title_jp") or "").strip(),
-        author=str(data.get("author") or "").strip(),
-        publisher=str(data.get("publisher") or "").strip(),
-        volume=str(data.get("volume") or "").strip(),
-        search_titles=[
-            str(item).strip()
-            for item in data.get("search_titles", [])
-            if str(item).strip()
-        ] if isinstance(data.get("search_titles"), list) else None,
+        title=title,
+        title_tw=title_tw,
+        title_jp=title_jp,
+        author=_first_text(data.get("author"), authors[0] if authors else ""),
+        publisher=_first_text(
+            data.get("publisher"),
+            publishers[0] if publishers else "",
+        ),
+        volume=_first_text(
+            data.get("volume"),
+            data.get("volume_text"),
+            data.get("volume_number"),
+        ),
+        search_titles=search_titles or None,
         confidence=float(data.get("confidence") or 0.0),
     )
+
+
+def _first_text(*values: object) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _list_text(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [_first_text(item) for item in value if _first_text(item)]
+    text = _first_text(value)
+    return [text] if text else []
+
+
+def _dedupe_text(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = value.strip()
+        if text and text not in result:
+            result.append(text)
+    return result

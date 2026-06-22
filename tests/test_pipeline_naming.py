@@ -16,6 +16,7 @@ from manga_pipeline.pipeline import (
     _build_clean_name,
     _build_series_name,
     _download_metadata_artwork,
+    _metadata_matches_record_context,
     _metadata_search_titles,
     _step_normalize_and_archive,
     _step_parse_metadata,
@@ -23,8 +24,11 @@ from manga_pipeline.pipeline import (
 
 THREE_BY_THREE_EYES = "3" + "\N{MULTIPLICATION SIGN}" + "3EYES"
 FW_TILDE = "\N{FULLWIDTH TILDE}"
+FW_DOT = "\N{FULLWIDTH FULL STOP}"
 DNA2_JP_SERIES = f"D・N・A2 {FW_TILDE}何処かで失くしたあいつのアイツ{FW_TILDE}"
 DNA2_JP_V3 = f"{DNA2_JP_SERIES} 3"
+GUNDAM_TW_TITLE = f"機動戰士鋼彈 光輝的阿{FW_DOT}巴瓦{FW_DOT}空"
+GUNDAM_JP_TITLE = "機動戦士ガンダム 光芒のア・バオア・クー"
 
 
 def test_build_clean_name_uses_series_and_sortable_volume() -> None:
@@ -89,6 +93,59 @@ def test_collection_title_uses_first_three_brackets_for_series_folder() -> None:
     assert parsed.author == "鳥山明"
     assert parsed.publisher == "東立"
     assert parsed.volume == "1"
+
+
+def test_collection_title_can_use_second_bracket_when_first_is_author_alias() -> None:
+    parsed = parse_filename("[銃夢(第一部)[木城ゆきと][東立]Vol_01.rar")
+
+    _apply_collection_title(
+        parsed,
+        "[木城ゆきと_木城幸人][銃夢][東立][aaa874160][9完]",
+    )
+
+    assert parsed.title == "銃夢"
+    assert parsed.series == "銃夢"
+    assert parsed.author == "木城ゆきと_木城幸人"
+    assert parsed.publisher == "東立"
+    assert parsed.volume == "1"
+
+
+def test_short_collection_title_rejects_substring_false_positive() -> None:
+    record = MangaRecord(collection_title="[木城ゆきと_木城幸人][銃夢][東立][9完]")
+    parsed = parse_filename("[銃夢(第一部)[木城ゆきと][東立]Vol_03.rar")
+    _apply_collection_title(parsed, record.collection_title)
+    false_positive = "木城ゆきと画集 ARS MAGNA デビューから銃夢火星戦記まで"
+    metadata = BookwalkerMetadata(
+        title=false_positive,
+        series=false_positive,
+        authors=["木城ゆきと"],
+        confidence=0.95,
+    )
+
+    assert _metadata_matches_record_context(metadata, parsed, record) is False
+
+
+def test_prompt_console_schema_adds_bookwalker_jp_search_title() -> None:
+    record = MangaRecord(
+        file_name=(
+            f"[Comic][{GUNDAM_TW_TITLE}]"
+            "[Ark Performance][角川][ZZGUNDAM][1完].zip"
+        )
+    )
+    parsed = parse_filename(record.file_name)
+    llm = LlmMetadata(
+        title=GUNDAM_TW_TITLE,
+        title_tw=GUNDAM_TW_TITLE,
+        title_jp=GUNDAM_JP_TITLE,
+        search_titles=[GUNDAM_JP_TITLE],
+        author="Ark Performance",
+        volume="1",
+        confidence=0.95,
+    )
+
+    titles = _metadata_search_titles(parsed, record, llm, "jp")
+
+    assert titles[0] == GUNDAM_JP_TITLE
 
 
 def test_llm_result_is_not_overridden_by_collection_title(

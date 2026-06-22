@@ -571,11 +571,11 @@ def _metadata_matches_record_context(
         return False
 
     expected_keys = _title_match_keys(expected_title)
-    actual_key = _title_key(metadata_title)
-    if not expected_keys or not actual_key:
+    actual_keys = _title_match_keys(metadata_title)
+    if not expected_keys or not actual_keys:
         return True
 
-    return any(key in actual_key or actual_key in key for key in expected_keys)
+    return _title_keys_match(expected_keys, actual_keys)
 
 
 def _title_candidate_matches_record_context(
@@ -600,10 +600,10 @@ def _title_candidate_matches_record_context(
         return False
 
     expected_keys = _title_match_keys(expected_title)
-    actual_key = _title_key(title)
-    if not expected_keys or not actual_key:
+    actual_keys = _title_match_keys(title)
+    if not expected_keys or not actual_keys:
         return True
-    return any(key in actual_key or actual_key in key for key in expected_keys)
+    return _title_keys_match(expected_keys, actual_keys)
 
 
 def _title_match_keys(title: str) -> list[str]:
@@ -619,6 +619,17 @@ def _title_match_keys(title: str) -> list[str]:
             if alias not in keys:
                 keys.append(alias)
     return keys
+
+
+def _title_keys_match(expected_keys: list[str], actual_keys: list[str]) -> bool:
+    """Match title keys while avoiding short-title substring false positives."""
+    for expected in expected_keys:
+        for actual in actual_keys:
+            if expected == actual:
+                return True
+            if len(expected) >= 4 and (actual.startswith(expected) or expected.startswith(actual)):
+                return True
+    return False
 
 
 def _title_key(value: str) -> str:
@@ -1258,9 +1269,9 @@ def _apply_collection_title(parsed: ParseResult, collection_title: str) -> None:
         return
     parsed.title = title
     parsed.series = title
-    if not parsed.author and collection.author:
+    if collection.author:
         parsed.author = collection.author
-    if not parsed.publisher and collection.publisher:
+    if collection.publisher:
         parsed.publisher = collection.publisher
     parsed.confidence = max(parsed.confidence, 0.6)
 
@@ -1273,10 +1284,12 @@ def _parse_collection_title(collection_title: str) -> ParseResult:
     """
     value = collection_title.strip()
 
-    loose = re.match(
-        r"^(?P<title>.+?)\s*\[(?P<author>[^\]]+)\]\[(?P<publisher>[^\]]+)\]",
-        value,
-    )
+    loose = None
+    if not value.startswith("["):
+        loose = re.match(
+            r"^(?P<title>.+?)\s*\[(?P<author>[^\]]+)\]\[(?P<publisher>[^\]]+)\]",
+            value,
+        )
     if loose:
         title = loose.group("title").strip(" []")
         if title:
@@ -1290,16 +1303,42 @@ def _parse_collection_title(collection_title: str) -> ParseResult:
 
     bracketed = re.findall(r"\[([^\]]+)\]", value)
     if value.startswith("[") and len(bracketed) >= 3:
-        title = bracketed[0].strip()
+        title_index = _collection_title_bracket_index(bracketed)
+        title = bracketed[title_index].strip()
+        if title_index > 0:
+            author = bracketed[0].strip()
+            publisher = (
+                bracketed[title_index + 1].strip()
+                if title_index + 1 < len(bracketed)
+                else ""
+            )
+        else:
+            author = (
+                bracketed[title_index + 1].strip()
+                if title_index + 1 < len(bracketed)
+                else ""
+            )
+            publisher = (
+                bracketed[title_index + 2].strip()
+                if title_index + 2 < len(bracketed)
+                else ""
+            )
         return ParseResult(
             title=title,
             series=title,
-            author=bracketed[1].strip(),
-            publisher=bracketed[2].strip(),
+            author=author,
+            publisher=publisher,
             confidence=0.8,
         )
 
     return parse_filename(collection_title)
+
+
+def _collection_title_bracket_index(bracketed: list[str]) -> int:
+    first = bracketed[0].strip()
+    if len(bracketed) >= 2 and "_" in first:
+        return 1
+    return 0
 
 
 def _remove_empty_inbox_parent(path: Path, cfg: PipelineConfig) -> None:
