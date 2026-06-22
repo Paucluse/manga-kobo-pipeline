@@ -431,7 +431,7 @@ def _search_bangumi_metadata(
         return None
 
     best = None
-    for title in _metadata_search_titles(parsed, record, llm_metadata, "jp"):
+    for title in _metadata_search_titles(parsed, record, llm_metadata, "bangumi"):
         if not _title_candidate_matches_record_context(title, parsed, record):
             continue
         try:
@@ -504,13 +504,25 @@ def _metadata_search_titles(
     llm_metadata: LlmMetadata | None,
     provider: str,
 ) -> list[str]:
+    """Build ordered search title list for a specific provider.
+
+    LLM per-provider queries come first (most relevant), followed by
+    the LLM-derived title fields, then the regex-parsed titles, and
+    finally any collection-directory hints.
+    """
     titles: list[str] = []
     if llm_metadata:
         if provider == "tw":
+            # Use LLM's curated TW queries first, then TW title, then general title
+            titles.extend(llm_metadata.queries_tw)
             titles.extend([llm_metadata.title_tw, llm_metadata.title])
-        else:
+        elif provider == "jp":
+            # Use LLM's curated JP queries first, then JP title, then general title
+            titles.extend(llm_metadata.queries_jp)
             titles.extend([llm_metadata.title_jp, llm_metadata.title])
-        titles.extend(llm_metadata.search_titles or [])
+        else:  # bangumi
+            titles.extend(llm_metadata.queries_bangumi)
+            titles.extend([llm_metadata.title_jp, llm_metadata.title_tw, llm_metadata.title])
     titles.extend([parsed.title, parsed.series])
     if record.collection_title:
         collection = _parse_collection_title(record.collection_title)
@@ -524,7 +536,7 @@ def _metadata_search_titles(
         for alias in _metadata_title_aliases(title, provider):
             if alias not in result:
                 result.append(alias)
-    return result[:8]
+    return result[:10]
 
 
 def _metadata_title_aliases(title: str, provider: str) -> list[str]:
@@ -753,22 +765,41 @@ def _step_parse_metadata(
             )
         llm_metadata = None
 
-    if llm_metadata and llm_metadata.confidence >= 0.65:
+    if llm_metadata is not None:
+        status = llm_metadata.parse_status
         logger.info(
-            "[ID:%s] LLM normalized filename: title=%s, author=%s, vol=%s",
+            "[ID:%s] LLM parse_status=%s confidence=%.2f verified=%s",
             record_id,
-            llm_metadata.title,
-            llm_metadata.author,
-            llm_metadata.volume,
+            status,
+            llm_metadata.confidence,
+            llm_metadata.verified,
         )
-        parsed.title = llm_metadata.title or parsed.title
-        parsed.series = llm_metadata.title or parsed.series
-        parsed.author = llm_metadata.author or parsed.author
-        parsed.publisher = llm_metadata.publisher or parsed.publisher
-        parsed.volume = llm_metadata.volume or parsed.volume
-        parsed.confidence = max(parsed.confidence, llm_metadata.confidence)
-        if record.collection_title:
-            _apply_collection_title(parsed, record.collection_title)
+        if llm_metadata.warnings:
+            logger.warning(
+                "[ID:%s] LLM warnings: %s",
+                record_id,
+                "; ".join(llm_metadata.warnings),
+            )
+        # Apply LLM result when status is ok/ambiguous and confidence is useful.
+        # For 'insufficient' the LLM itself says it cannot parse; still use
+        # what little it found but keep confidence low.
+        apply_threshold = 0.5 if status == "ok" else 0.4
+        if llm_metadata.confidence >= apply_threshold:
+            logger.info(
+                "[ID:%s] LLM applied: title=%s, author=%s, vol=%s",
+                record_id,
+                llm_metadata.title,
+                llm_metadata.author,
+                llm_metadata.volume,
+            )
+            parsed.title = llm_metadata.title or parsed.title
+            parsed.series = llm_metadata.title or parsed.series
+            parsed.author = llm_metadata.author or parsed.author
+            parsed.publisher = llm_metadata.publisher or parsed.publisher
+            parsed.volume = llm_metadata.volume or parsed.volume
+            parsed.confidence = max(parsed.confidence, llm_metadata.confidence)
+            if record.collection_title:
+                _apply_collection_title(parsed, record.collection_title)
 
     mode = control.get_mode()
     if mode in {MODE_MANUAL_BOOK, MODE_MANUAL_SERIES}:

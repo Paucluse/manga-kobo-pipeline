@@ -211,14 +211,16 @@ def _lookup_metadata(
         logger.warning("[ID:%s] LLM filename normalization failed: %s", record.id, e)
         llm_metadata = None
 
-    if llm_metadata and llm_metadata.confidence >= 0.65:
-        parsed.title = llm_metadata.title or parsed.title
-        parsed.series = llm_metadata.title or parsed.series
-        parsed.author = llm_metadata.author or parsed.author
-        parsed.publisher = llm_metadata.publisher or parsed.publisher
-        parsed.volume = llm_metadata.volume or parsed.volume
-        if record.collection_title:
-            _apply_collection_title(parsed, record.collection_title)
+    if llm_metadata is not None:
+        apply_threshold = 0.5 if llm_metadata.parse_status == "ok" else 0.4
+        if llm_metadata.confidence >= apply_threshold:
+            parsed.title = llm_metadata.title or parsed.title
+            parsed.series = llm_metadata.title or parsed.series
+            parsed.author = llm_metadata.author or parsed.author
+            parsed.publisher = llm_metadata.publisher or parsed.publisher
+            parsed.volume = llm_metadata.volume or parsed.volume
+            if record.collection_title:
+                _apply_collection_title(parsed, record.collection_title)
 
     volume = parsed.volume or record.volume
     author = parsed.author or record.author
@@ -259,7 +261,7 @@ def _lookup_metadata(
             record,
             "Bangumi",
             search_bangumi,
-            _metadata_search_titles(parsed, record, llm_metadata, "jp"),
+            _metadata_search_titles(parsed, record, llm_metadata, "bangumi"),
             volume,
             author,
             cfg.metadata.bangumi_min_confidence,
