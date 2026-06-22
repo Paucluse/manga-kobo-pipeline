@@ -18,6 +18,7 @@ class ProcessingStatus(enum.StrEnum):
     PROCESSING = "processing"
     NORMALIZED = "normalized"
     METADATA_PARSED = "metadata_parsed"
+    AWAITING_METADATA_APPROVAL = "awaiting_metadata_approval"
     NEEDS_REVIEW = "needs_review"
     ARCHIVED = "archived"
     CONVERTED = "converted"

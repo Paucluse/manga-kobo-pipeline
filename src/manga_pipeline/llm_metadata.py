@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,12 +29,16 @@ class LlmMetadata:
     volume: str = ""
     search_titles: list[str] | None = None
     confidence: float = 0.0
+    raw_content: str = ""
+    prompt: str = ""
+    elapsed_ms: int = 0
 
 
 def normalize_with_llm(
     filename: str,
     parsed: ParseResult,
     cfg: MetadataConfig,
+    prompt_template: str = "",
 ) -> LlmMetadata | None:
     """Normalize filename metadata through an OpenAI-compatible chat endpoint."""
     if not cfg.llm_normalize_enabled or not cfg.llm_model:
@@ -48,18 +53,19 @@ def normalize_with_llm(
         )
         return None
 
+    system_prompt = prompt_template or (
+        "你是漫画电子书文件名标准化器。只输出 JSON, 不要解释。"
+        "你的任务是从可能不准确的文件名推断正式书名和检索关键词。"
+        "优先给出台版正式书名; 如台版可能不存在, 同时给出日版正式书名。"
+        "不要编造出版社; 不确定则留空。"
+    )
     payload = {
         "model": cfg.llm_model,
         "temperature": 0,
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "你是漫画电子书文件名标准化器。只输出 JSON, 不要解释。"
-                    "你的任务是从可能不准确的文件名推断正式书名和检索关键词。"
-                    "优先给出台版正式书名; 如台版可能不存在, 同时给出日版正式书名。"
-                    "不要编造出版社; 不确定则留空。"
-                ),
+                "content": system_prompt,
             },
             {
                 "role": "user",
@@ -92,10 +98,17 @@ def normalize_with_llm(
         "response_format": {"type": "json_object"},
     }
 
+    start = time.monotonic()
     response = _post_chat_completion(cfg, api_key, payload)
+    elapsed_ms = int((time.monotonic() - start) * 1000)
     payload_json = response.json()
     content = payload_json["choices"][0]["message"]["content"]
-    return _parse_llm_json(content)
+    metadata = _parse_llm_json(content)
+    if metadata is not None:
+        metadata.raw_content = content
+        metadata.prompt = system_prompt
+        metadata.elapsed_ms = elapsed_ms
+    return metadata
 
 
 def _read_api_key(cfg: MetadataConfig) -> str:

@@ -23,6 +23,14 @@ from manga_pipeline.bookwalker_tw import (
 )
 from manga_pipeline.comicinfo import write_comicinfo_to_cbz
 from manga_pipeline.config import PipelineConfig
+from manga_pipeline.control import (
+    MODE_MANUAL_BOOK,
+    MODE_MANUAL_SERIES,
+    MODE_PAUSED,
+    ControlStore,
+    MetadataCandidate,
+    candidate_from_metadata,
+)
 from manga_pipeline.database import Database
 from manga_pipeline.epub_metadata import write_epub_metadata
 from manga_pipeline.filename_parser import ParseResult, parse_filename
@@ -64,6 +72,14 @@ def process_all_pending(cfg: PipelineConfig, db: Database) -> int:
 
 def _process_all_pending_locked(cfg: PipelineConfig, db: Database) -> int:
     completed = 0
+    control = ControlStore(db.db_path.parent)
+    try:
+        if control.get_mode() == MODE_PAUSED:
+            logger.info("Pipeline control mode is paused; skipping processing cycle.")
+            return 0
+    finally:
+        control.close()
+
     _recover_already_imported_failed_records(cfg, db)
     _repair_done_collection_title_records(cfg, db)
     # Recover zombie tasks (stuck in intermediate states due to crash/restart)
@@ -454,6 +470,34 @@ def _search_bangumi_metadata(
     return None
 
 
+def _collect_metadata_candidates(
+    record_id: int,
+    parsed: ParseResult,
+    record: MangaRecord,
+    llm_metadata: LlmMetadata | None,
+    cfg: PipelineConfig,
+) -> list[MetadataCandidate]:
+    """Collect best provider candidates for human review."""
+    candidates: list[MetadataCandidate] = []
+    providers = [
+        ("bookwalker_tw", _search_bookwalker_tw_metadata),
+        ("bookwalker_jp", _search_bookwalker_jp_metadata),
+        ("bangumi", _search_bangumi_metadata),
+    ]
+    seen: set[tuple[str, str]] = set()
+    for provider, search_func in providers:
+        metadata = search_func(record_id, parsed, record, llm_metadata, cfg)
+        if metadata is None:
+            continue
+        candidate = candidate_from_metadata(provider, metadata)
+        key = (candidate.provider, candidate.detail_url or candidate.provider_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
 def _metadata_search_titles(
     parsed: ParseResult,
     record: MangaRecord,
@@ -643,15 +687,43 @@ def _step_parse_metadata(
     parsed = parse_filename(record.file_name)
     if record.collection_title:
         _apply_collection_title(parsed, record.collection_title)
+    control = ControlStore(db.db_path.parent)
+    llm_run_id: int | None = None
     try:
         source_name = (
             f"{record.collection_title} {record.file_name}"
             if record.collection_title
             else record.file_name
         )
-        llm_metadata = normalize_with_llm(source_name, parsed, cfg.metadata)
+        prompt = control.get_active_prompt()
+        llm_metadata = normalize_with_llm(source_name, parsed, cfg.metadata, prompt)
+        if llm_metadata is not None:
+            llm_run_id = control.log_llm_run(
+                record_id=record_id,
+                source_name=source_name,
+                prompt=llm_metadata.prompt,
+                response=llm_metadata.raw_content,
+                parsed_json={
+                    "title": llm_metadata.title,
+                    "title_tw": llm_metadata.title_tw,
+                    "title_jp": llm_metadata.title_jp,
+                    "author": llm_metadata.author,
+                    "publisher": llm_metadata.publisher,
+                    "volume": llm_metadata.volume,
+                    "search_titles": llm_metadata.search_titles or [],
+                    "confidence": llm_metadata.confidence,
+                },
+                elapsed_ms=llm_metadata.elapsed_ms,
+            )
     except Exception as e:
         logger.warning("[ID:%s] LLM filename normalization failed: %s", record_id, e)
+        with contextlib.suppress(Exception):
+            control.log_llm_run(
+                record_id=record_id,
+                source_name=record.file_name,
+                prompt=control.get_active_prompt(),
+                error=str(e),
+            )
         llm_metadata = None
 
     if llm_metadata and llm_metadata.confidence >= 0.65:
@@ -670,6 +742,50 @@ def _step_parse_metadata(
         parsed.confidence = max(parsed.confidence, llm_metadata.confidence)
         if record.collection_title:
             _apply_collection_title(parsed, record.collection_title)
+
+    mode = control.get_mode()
+    if mode in {MODE_MANUAL_BOOK, MODE_MANUAL_SERIES}:
+        candidates = _collect_metadata_candidates(record_id, parsed, record, llm_metadata, cfg)
+        policy = (
+            control.get_series_policy(record.collection_title)
+            if mode == MODE_MANUAL_SERIES and record.collection_title
+            else None
+        )
+        if policy:
+            selected = _select_policy_candidate(candidates, policy)
+            if selected is not None:
+                _apply_review_candidate(parsed, selected)
+                db.update_status(
+                    record_id,
+                    ProcessingStatus.METADATA_PARSED,
+                    **_candidate_record_fields(parsed, selected),
+                )
+                control.close()
+                return True
+
+        scope = "series" if mode == MODE_MANUAL_SERIES and record.collection_title else "book"
+        control.create_or_update_approval(
+            record=record,
+            scope=scope,
+            parsed={
+                "title": parsed.title,
+                "series": parsed.series,
+                "author": parsed.author,
+                "publisher": parsed.publisher,
+                "volume": parsed.volume,
+                "confidence": parsed.confidence,
+                "llm_run_id": llm_run_id,
+            },
+            candidates=candidates,
+        )
+        db.update_status(
+            record_id,
+            ProcessingStatus.AWAITING_METADATA_APPROVAL,
+            error_message="等待前端确认元数据",
+        )
+        control.close()
+        return False
+    control.close()
 
     accepted_metadata = None
     bookwalker = _search_bookwalker_tw_metadata(
@@ -798,6 +914,45 @@ def _step_parse_metadata(
         confidence=str(parsed.confidence),
     )
     return True
+
+
+def _select_policy_candidate(
+    candidates: list[MetadataCandidate],
+    policy: dict[str, object],
+) -> MetadataCandidate | None:
+    provider = str(policy.get("provider") or "")
+    for candidate in candidates:
+        if candidate.provider == provider:
+            return candidate
+    return None
+
+
+def _apply_review_candidate(parsed: ParseResult, candidate: MetadataCandidate) -> None:
+    parsed.title = candidate.series or candidate.title or parsed.title
+    parsed.series = candidate.series or parsed.series or parsed.title
+    parsed.volume = candidate.volume or parsed.volume
+    parsed.author = candidate.author or parsed.author
+    parsed.publisher = candidate.publisher or parsed.publisher
+    parsed.confidence = max(parsed.confidence, candidate.confidence)
+
+
+def _candidate_record_fields(
+    parsed: ParseResult,
+    candidate: MetadataCandidate,
+) -> dict[str, str]:
+    return {
+        "title": parsed.title,
+        "author": parsed.author,
+        "series": parsed.series,
+        "volume": parsed.volume,
+        "publisher": parsed.publisher,
+        "summary": candidate.summary,
+        "cover_url": candidate.cover_url,
+        "source_url": candidate.detail_url,
+        "isbn": candidate.isbn,
+        "page_count": candidate.page_count,
+        "confidence": str(parsed.confidence),
+    }
 
 
 def _step_normalize_and_archive(

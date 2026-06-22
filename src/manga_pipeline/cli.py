@@ -8,6 +8,7 @@ Commands:
     status   - Show processing statistics
     retry    - Retry a failed task
     rescrape - Re-scrape BookWalker metadata for imported books
+    api      - Start the web control API
     dry-run  - Preview processing without execution
 """
 
@@ -253,6 +254,25 @@ def run(
         watch_inbox(cfg, db)
     finally:
         db.close()
+
+
+@app.command()
+def api(
+    host: str = typer.Option("0.0.0.0", "--host", help="Bind host"),
+    port: int = typer.Option(8000, "--port", help="Bind port"),
+    config_file: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to config.yaml"
+    ),
+) -> None:
+    """Start the web control API."""
+    import os
+
+    import uvicorn
+
+    if config_file is not None:
+        os.environ["MANGA_PIPELINE_CONFIG"] = str(config_file)
+    _load_and_init(config_file)
+    uvicorn.run("manga_pipeline.api:app", host=host, port=port)
 
 
 @app.command()

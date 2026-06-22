@@ -29,6 +29,12 @@ data/
 # Docker
 docker-compose.override.yml
 
+# Frontend
+web/node_modules/
+web/dist/
+web/.agents/
+web/.codex/
+
 # OS
 .DS_Store
 Thumbs.db

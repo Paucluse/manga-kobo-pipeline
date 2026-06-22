@@ -29,6 +29,41 @@ services:
     # command: ["process"]   # 单次处理
     # command: ["scan"]      # 仅扫描
 
+  # ── 管线控制 API（供前端使用）──────────────────────────────
+  pipeline-api:
+    build: .
+    container_name: pipeline-api
+    restart: unless-stopped
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./secrets/gemini_api_key:/run/secrets/gemini_api_key:ro
+      - ${DATA_ROOT:-/srv/ebooks}/inbox:/data/inbox
+      - ${DATA_ROOT:-/srv/ebooks}/processing:/data/processing
+      - ${DATA_ROOT:-/srv/ebooks}/archive_cbz:/data/archive_cbz
+      - ${DATA_ROOT:-/srv/ebooks}/kepub_ready:/data/kepub_ready
+      - ${DATA_ROOT:-/srv/ebooks}/komga-library:/data/komga-library
+      - ${DATA_ROOT:-/srv/ebooks}/pipeline-state:/data/state
+      - ${DATA_ROOT:-/srv/ebooks}/manual-review:/data/manual-review
+      - ${DATA_ROOT:-/srv/ebooks}/logs:/data/logs
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      - MANGA_PIPELINE_CONFIG=/app/config.yaml
+      - MANGA_PIPELINE_LOG_LEVEL=${MANGA_PIPELINE_LOG_LEVEL:-INFO}
+      - HOME=/tmp
+    depends_on:
+      - komga
+
+  # ── 管线控制台前端（LAN 使用）──────────────────────────────
+  pipeline-web:
+    build: ./web
+    container_name: pipeline-web
+    restart: unless-stopped
+    ports:
+      - "${PIPELINE_WEB_PORT:-8080}:80"
+    depends_on:
+      - pipeline-api
+
   # ── Komga（漫画书库 + 网页阅读 + Kobo 同步）────────────────
   komga:
     image: gotson/komga:latest

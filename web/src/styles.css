@@ -1,0 +1,303 @@
+:root {
+  color: #1f2933;
+  background: #eef2f5;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  width: min(1440px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 24px 0 48px;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 24px;
+}
+
+h2 {
+  font-size: 18px;
+}
+
+h3 {
+  margin-top: 16px;
+  font-size: 15px;
+}
+
+section,
+.auth,
+.llm-detail {
+  margin-top: 16px;
+  padding: 16px;
+  background: #ffffff;
+  border: 1px solid #d8e0e6;
+  border-radius: 8px;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #9fb0bf;
+  border-radius: 6px;
+  background: #f7fafc;
+  color: #1f2933;
+  cursor: pointer;
+}
+
+button:hover,
+button.selected {
+  background: #245b8f;
+  border-color: #245b8f;
+  color: #ffffff;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid #b9c7d3;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+textarea {
+  min-height: 150px;
+  resize: vertical;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+pre {
+  overflow: auto;
+  max-height: 280px;
+  padding: 12px;
+  border-radius: 6px;
+  background: #17212b;
+  color: #e8eef4;
+}
+
+.topbar,
+.section-head,
+.actions,
+.mode-row,
+.manual-search,
+.approval-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar,
+.section-head,
+.approval-title {
+  justify-content: space-between;
+}
+
+.topbar span,
+.section-head span,
+.approval p {
+  color: #617282;
+  font-size: 13px;
+}
+
+.actions,
+.mode-row {
+  flex-wrap: wrap;
+}
+
+.auth {
+  width: min(420px, 100%);
+  margin: 15vh auto 0;
+  display: grid;
+  gap: 14px;
+}
+
+.error {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid #f2a7a7;
+  border-radius: 6px;
+  background: #fff1f1;
+  color: #9b1c1c;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.metric {
+  min-height: 76px;
+  padding: 12px;
+  border: 1px solid #d8e0e6;
+  border-radius: 6px;
+  background: #f7fafc;
+}
+
+.metric span {
+  display: block;
+  color: #617282;
+  font-size: 13px;
+}
+
+.metric strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 24px;
+}
+
+.prompt {
+  margin: 12px 0;
+}
+
+.approval {
+  display: grid;
+  gap: 10px;
+  padding: 14px 0;
+  border-top: 1px solid #e2e8ee;
+}
+
+.manual-search,
+.form-grid {
+  display: grid;
+  grid-template-columns: minmax(150px, 220px) 1fr auto;
+  gap: 10px;
+}
+
+.candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.candidate {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #d8e0e6;
+  border-radius: 6px;
+  background: #fbfcfd;
+}
+
+.candidate img {
+  width: 88px;
+  height: 124px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #d8e0e6;
+}
+
+.candidate div {
+  display: grid;
+  gap: 6px;
+}
+
+.candidate p,
+.candidate a {
+  color: #617282;
+  font-size: 13px;
+}
+
+.form-grid {
+  grid-template-columns: 1fr 1fr 120px 160px;
+  margin-bottom: 12px;
+}
+
+.check {
+  align-content: end;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+}
+
+.check input {
+  width: 18px;
+  min-height: 18px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin-top: 10px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  max-width: 360px;
+  padding: 9px 10px;
+  border-bottom: 1px solid #e2e8ee;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  color: #526575;
+  background: #f7fafc;
+  font-weight: 700;
+}
+
+tbody tr:hover {
+  background: #f4f8fb;
+}
+
+.empty {
+  margin-top: 10px;
+  color: #617282;
+}
+
+@media (max-width: 760px) {
+  main {
+    width: min(100vw - 20px, 1440px);
+    padding-top: 12px;
+  }
+
+  .topbar,
+  .section-head,
+  .manual-search,
+  .form-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .candidate-grid {
+    grid-template-columns: 1fr;
+  }
+}
