@@ -59,6 +59,12 @@ class MetadataConfig(BaseModel):
     bookwalker_tw_enabled: bool = True
     bookwalker_tw_min_confidence: float = 0.65
     bookwalker_tw_max_candidates: int = 8
+    bookwalker_jp_enabled: bool = True
+    bookwalker_jp_min_confidence: float = 0.65
+    bookwalker_jp_max_candidates: int = 8
+    bangumi_enabled: bool = True
+    bangumi_min_confidence: float = 0.65
+    bangumi_max_candidates: int = 30
     download_bookwalker_covers: bool = True
     llm_normalize_enabled: bool = False
     llm_base_url: str = "https://api.openai.com/v1"

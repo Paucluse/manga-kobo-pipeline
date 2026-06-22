@@ -215,6 +215,61 @@ class TestNormalizeCbz:
                 pdf_config=PdfConfig(enabled=False),
             )
 
+    def test_extract_epub_images_to_cbz(self, tmp_path: Path) -> None:
+        """EPUB image pages should be copied losslessly into a CBZ."""
+        src = tmp_path / "input" / "manga.epub"
+        src.parent.mkdir()
+        with zipfile.ZipFile(src, "w") as zf:
+            zf.writestr("mimetype", "application/epub+zip")
+            zf.writestr(
+                "META-INF/container.xml",
+                """<?xml version="1.0"?>
+                <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+                  <rootfiles>
+                    <rootfile full-path="OPS/content.opf"
+                      media-type="application/oebps-package+xml"/>
+                  </rootfiles>
+                </container>
+                """,
+            )
+            zf.writestr(
+                "OPS/content.opf",
+                """<?xml version="1.0"?>
+                <package xmlns="http://www.idpf.org/2007/opf">
+                  <manifest>
+                    <item id="p1" href="Text/page1.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="p2" href="Text/page2.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="img1" href="Images/p001.jpg" media-type="image/jpeg"/>
+                    <item id="img2" href="Images/p002.png" media-type="image/png"/>
+                  </manifest>
+                  <spine>
+                    <itemref idref="p2"/>
+                    <itemref idref="p1"/>
+                  </spine>
+                </package>
+                """,
+            )
+            zf.writestr(
+                "OPS/Text/page1.xhtml",
+                '<html xmlns="http://www.w3.org/1999/xhtml">'
+                '<body><img src="../Images/p001.jpg"/></body></html>',
+            )
+            zf.writestr(
+                "OPS/Text/page2.xhtml",
+                '<html xmlns="http://www.w3.org/1999/xhtml">'
+                '<body><img src="../Images/p002.png"/></body></html>',
+            )
+            zf.writestr("OPS/Images/p001.jpg", b"original jpg bytes")
+            zf.writestr("OPS/Images/p002.png", b"original png bytes")
+
+        result = normalize_to_cbz(src, tmp_path / "archive")
+
+        assert result.name == "manga.cbz"
+        with zipfile.ZipFile(result) as zf:
+            assert zf.namelist() == ["0001.png", "0002.jpg"]
+            assert zf.read("0001.png") == b"original png bytes"
+            assert zf.read("0002.jpg") == b"original jpg bytes"
+
     def test_pack_directory(self, tmp_path: Path) -> None:
         """Should pack image directory as CBZ."""
         img_dir = tmp_path / "manga_images"
@@ -443,6 +498,7 @@ class TestScannerIntegration:
         series_dir = inbox / "苍蓝钢铁战舰"
         volume_dir = series_dir / "4"
         volume_dir.mkdir(parents=True)
+        (series_dir / "1.epub").write_bytes(b"volume 1")
         (series_dir / "2.zip").write_bytes(b"volume 2")
         (series_dir / "苍蓝钢铁战舰 第03卷.cbz").write_bytes(b"volume 3")
         (volume_dir / "001.jpg").write_bytes(b"page 1")
@@ -451,8 +507,9 @@ class TestScannerIntegration:
         db = Database(tmp_path / "state" / "test.db")
         discovered = scan_inbox(inbox, db)
 
-        assert len(discovered) == 3
+        assert len(discovered) == 4
         by_name = {record.file_name: record for record in discovered}
+        assert by_name["1.epub"].collection_title == "苍蓝钢铁战舰"
         assert by_name["2.zip"].collection_title == "苍蓝钢铁战舰"
         assert by_name["苍蓝钢铁战舰 第03卷.cbz"].collection_title == "苍蓝钢铁战舰"
         assert by_name["4"].collection_title == "苍蓝钢铁战舰"

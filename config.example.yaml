@@ -35,6 +35,12 @@ metadata:
   bookwalker_tw_enabled: true   # 使用 BookWalker 台湾作为元数据来源
   bookwalker_tw_min_confidence: 0.65
   bookwalker_tw_max_candidates: 8
+  bookwalker_jp_enabled: true   # BookWalker 台湾无可接受匹配时，尝试日本站
+  bookwalker_jp_min_confidence: 0.65
+  bookwalker_jp_max_candidates: 8
+  bangumi_enabled: true         # BookWalker 台湾/日本都无可接受匹配时，用 Bangumi 兜底
+  bangumi_min_confidence: 0.65
+  bangumi_max_candidates: 30
   download_bookwalker_covers: true
   llm_normalize_enabled: false  # 可选：用 LLM 从文件名补齐标题/作者/出版社
   llm_base_url: https://generativelanguage.googleapis.com/v1beta/openai

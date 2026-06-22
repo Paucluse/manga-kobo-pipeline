@@ -1,8 +1,11 @@
 """Tests for Komga-friendly pipeline naming."""
 
+import zipfile
 from pathlib import Path
 
-from manga_pipeline.config import MetadataConfig, PipelineConfig
+from manga_pipeline.bangumi import BangumiMetadata
+from manga_pipeline.bookwalker_tw import BookwalkerMetadata
+from manga_pipeline.config import MetadataConfig, PathsConfig, PipelineConfig
 from manga_pipeline.database import Database
 from manga_pipeline.filename_parser import parse_filename
 from manga_pipeline.llm_metadata import LlmMetadata
@@ -12,11 +15,16 @@ from manga_pipeline.pipeline import (
     _build_book_title,
     _build_clean_name,
     _build_series_name,
-    _download_bookwalker_artwork,
+    _download_metadata_artwork,
+    _metadata_search_titles,
+    _step_normalize_and_archive,
     _step_parse_metadata,
 )
 
 THREE_BY_THREE_EYES = "3" + "\N{MULTIPLICATION SIGN}" + "3EYES"
+FW_TILDE = "\N{FULLWIDTH TILDE}"
+DNA2_JP_SERIES = f"D・N・A2 {FW_TILDE}何処かで失くしたあいつのアイツ{FW_TILDE}"
+DNA2_JP_V3 = f"{DNA2_JP_SERIES} 3"
 
 
 def test_build_clean_name_uses_series_and_sortable_volume() -> None:
@@ -89,6 +97,8 @@ def test_llm_result_is_not_overridden_by_collection_title(
     cfg = PipelineConfig(
         metadata=MetadataConfig(
             bookwalker_tw_enabled=False,
+            bookwalker_jp_enabled=False,
+            bangumi_enabled=False,
             llm_normalize_enabled=True,
             llm_model="gemini-3.1-flash-lite",
         )
@@ -127,6 +137,268 @@ def test_llm_result_is_not_overridden_by_collection_title(
     assert updated.volume == "1"
 
 
+def test_bangumi_fallback_when_bookwalker_has_no_match(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig(
+        metadata=MetadataConfig(
+            bookwalker_tw_enabled=True,
+            bookwalker_jp_enabled=False,
+            bangumi_enabled=True,
+            bangumi_min_confidence=0.65,
+            llm_normalize_enabled=False,
+        )
+    )
+    db = Database(tmp_path / "pipeline.db")
+    record = MangaRecord(
+        file_name="MONSTER-怪物- v001.zip",
+        file_hash="monster-v1",
+        collection_title="MONSTER-怪物-",
+        current_status=ProcessingStatus.WAITING_STABLE,
+    )
+    record_id = db.insert_record(record)
+
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bookwalker_tw", lambda *_a, **_k: None)
+
+    def fake_bangumi(*_args: object, **_kwargs: object) -> BangumiMetadata:
+        return BangumiMetadata(
+            subject_id="2081",
+            title="怪物",
+            series="怪物",
+            authors=["浦泽直树"],
+            publisher="小学館",
+            summary="故事简介",
+            cover_url="https://img/monster.jpg",
+            detail_url="https://bgm.tv/subject/2081",
+            confidence=0.85,
+        )
+
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bangumi", fake_bangumi)
+
+    try:
+        assert _step_parse_metadata(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.title == "怪物"
+    assert updated.series == "怪物"
+    assert updated.volume == "1"
+    assert updated.author == "浦泽直树"
+    assert updated.publisher == "小学館"
+    assert updated.summary == "故事简介"
+    assert updated.cover_url == "https://img/monster.jpg"
+    assert updated.source_url == "https://bgm.tv/subject/2081"
+
+
+def test_bookwalker_jp_second_layer_before_bangumi(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig(
+        metadata=MetadataConfig(
+            bookwalker_tw_enabled=True,
+            bookwalker_jp_enabled=True,
+            bookwalker_jp_min_confidence=0.65,
+            bangumi_enabled=True,
+            llm_normalize_enabled=True,
+            llm_model="gemini-3.1-flash-lite",
+        )
+    )
+    db = Database(tmp_path / "pipeline.db")
+    record = MangaRecord(
+        file_name="[Kmoe][DNA][桂正和]卷03.epub",
+        file_hash="dna-v3",
+        collection_title="DNA²",
+        current_status=ProcessingStatus.WAITING_STABLE,
+    )
+    record_id = db.insert_record(record)
+
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bookwalker_tw", lambda *_a, **_k: None)
+
+    def fake_normalize(*_args: object, **_kwargs: object) -> LlmMetadata:
+        return LlmMetadata(
+            title="D・N・A2",
+            title_jp=DNA2_JP_SERIES,
+            search_titles=["D・N・A²", "DNA2"],
+            author="桂正和",
+            volume="3",
+            confidence=0.95,
+        )
+
+    def fake_bookwalker_jp(title: str, **_kwargs: object) -> BookwalkerMetadata:
+        assert title == DNA2_JP_SERIES
+        return BookwalkerMetadata(
+            product_id="de77397f43-76ca-44f5-aa61-20b09f6600ce",
+            title=DNA2_JP_V3,
+            series=DNA2_JP_SERIES,
+            volume="3",
+            authors=["桂正和"],
+            publisher="集英社",
+            summary="第三卷简介",
+            cover_url="https://c.bookwalker.jp/869726/t_700x780.jpg",
+            detail_url="https://bookwalker.jp/de77397f43-76ca-44f5-aa61-20b09f6600ce/",
+            confidence=0.95,
+        )
+
+    def fail_bangumi(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Bangumi should not run when BookWalker JP matches")
+
+    monkeypatch.setattr("manga_pipeline.pipeline.normalize_with_llm", fake_normalize)
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bookwalker_jp", fake_bookwalker_jp)
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bangumi", fail_bangumi)
+
+    try:
+        assert _step_parse_metadata(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.title == DNA2_JP_SERIES
+    assert updated.series == DNA2_JP_SERIES
+    assert updated.volume == "3"
+    assert updated.publisher == "集英社"
+    assert updated.source_url == "https://bookwalker.jp/de77397f43-76ca-44f5-aa61-20b09f6600ce/"
+
+
+def test_collection_edition_rejects_bookwalker_false_positive(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig(
+        metadata=MetadataConfig(
+            bookwalker_tw_enabled=True,
+            bookwalker_tw_min_confidence=0.65,
+            bookwalker_jp_enabled=False,
+            bangumi_enabled=True,
+            bangumi_min_confidence=0.65,
+            llm_normalize_enabled=True,
+            llm_model="gemini-3.1-flash-lite",
+        )
+    )
+    db = Database(tmp_path / "pipeline.db")
+    record = MangaRecord(
+        file_name="[Comic][SLAM.DUNK完全版][井上雄彦][天下][C.C]Vol_01.zip",
+        file_hash="slam-dunk-complete-v1",
+        collection_title="[SLAM.DUNK完全版][井上雄彦][天下][C.C][1-24完]",
+        current_status=ProcessingStatus.WAITING_STABLE,
+    )
+    record_id = db.insert_record(record)
+
+    def fake_normalize(*_args: object, **_kwargs: object) -> LlmMetadata:
+        return LlmMetadata(
+            title="灌籃高手新裝再編版",
+            title_tw="灌籃高手新裝再編版",
+            title_jp="SLAM DUNK 完全版",
+            search_titles=["灌籃高手新裝再編版", "SLAM DUNK 完全版"],
+            author="井上雄彦",
+            volume="1",
+            confidence=0.95,
+        )
+
+    def fake_bookwalker_tw(*_args: object, **_kwargs: object) -> BookwalkerMetadata:
+        return BookwalkerMetadata(
+            product_id="251291",
+            title="灌籃高手新裝再編版 (1)",
+            series="灌籃高手新裝再編版",
+            volume="1",
+            authors=["井上雄彦"],
+            publisher="尖端出版",
+            cover_url="https://img/slam-new.jpg",
+            detail_url="https://www.bookwalker.com.tw/product/251291",
+            confidence=0.95,
+        )
+
+    def fake_bangumi(*_args: object, **_kwargs: object) -> BangumiMetadata:
+        return BangumiMetadata(
+            subject_id="9093",
+            title="灌籃高手 完全版",
+            series="灌籃高手 完全版",
+            volume="1",
+            authors=["井上雄彦"],
+            publisher="集英社",
+            cover_url="https://img/slam-complete.jpg",
+            detail_url="https://bgm.tv/subject/9093",
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr("manga_pipeline.pipeline.normalize_with_llm", fake_normalize)
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bookwalker_tw", fake_bookwalker_tw)
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bangumi", fake_bangumi)
+
+    try:
+        assert _step_parse_metadata(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.title == "灌籃高手 完全版"
+    assert updated.series == "灌籃高手 完全版"
+    assert updated.volume == "1"
+    assert updated.source_url == "https://bgm.tv/subject/9093"
+
+
+def test_dna2_collection_adds_bookwalker_jp_official_search_title() -> None:
+    record = MangaRecord(
+        file_name="1",
+        collection_title="DNA²",
+    )
+    parsed = parse_filename(record.file_name)
+    _apply_collection_title(parsed, record.collection_title)
+
+    assert DNA2_JP_SERIES in _metadata_search_titles(parsed, record, None, "jp")
+
+
+def test_normalize_step_accepts_image_directory_source(tmp_path: Path) -> None:
+    paths = PathsConfig(
+        inbox=tmp_path / "inbox",
+        processing=tmp_path / "processing",
+        archive_cbz=tmp_path / "archive_cbz",
+        kepub_ready=tmp_path / "kepub_ready",
+        komga_library=tmp_path / "komga-library",
+        state=tmp_path / "state",
+        manual_review=tmp_path / "manual-review",
+        logs=tmp_path / "logs",
+    )
+    for path in paths.model_dump().values():
+        Path(path).mkdir(parents=True, exist_ok=True)
+
+    source_dir = paths.inbox / "DNA²" / "1"
+    source_dir.mkdir(parents=True)
+    (source_dir / "001.png").write_bytes(b"page 1")
+    (source_dir / "002.jpg").write_bytes(b"page 2")
+
+    cfg = PipelineConfig(paths=paths)
+    db = Database(paths.state / "pipeline.db")
+    record = MangaRecord(
+        original_path=str(source_dir),
+        file_name="1",
+        file_hash="dna2-v1",
+        current_status=ProcessingStatus.METADATA_PARSED,
+        title="DNA²",
+        series="DNA²",
+        volume="1",
+        author="桂正和",
+    )
+    record_id = db.insert_record(record)
+
+    try:
+        assert _step_normalize_and_archive(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.ARCHIVED
+    archive_path = Path(updated.archive_path)
+    assert archive_path.name == "DNA² v001.cbz"
+    with zipfile.ZipFile(archive_path) as zf:
+        assert "001.png" in zf.namelist()
+        assert "002.jpg" in zf.namelist()
+        assert "ComicInfo.xml" in zf.namelist()
+
+
 def test_bookwalker_series_cover_prefers_first_volume(
     tmp_path: Path, monkeypatch: object
 ) -> None:
@@ -150,7 +422,7 @@ def test_bookwalker_series_cover_prefers_first_volume(
         volume="2",
         cover_url="https://img.example/vol2.jpg",
     )
-    _download_bookwalker_artwork(
+    _download_metadata_artwork(
         volume_2,
         series_dir / "蒼藍鋼鐵戰艦 v002.kepub.epub",
         series_dir,
@@ -164,7 +436,7 @@ def test_bookwalker_series_cover_prefers_first_volume(
         volume="3",
         cover_url="https://img.example/vol3.jpg",
     )
-    _download_bookwalker_artwork(
+    _download_metadata_artwork(
         volume_3,
         series_dir / "蒼藍鋼鐵戰艦 v003.kepub.epub",
         series_dir,
@@ -180,7 +452,7 @@ def test_bookwalker_series_cover_prefers_first_volume(
         volume="001",
         cover_url="https://img.example/vol1.jpg",
     )
-    _download_bookwalker_artwork(
+    _download_metadata_artwork(
         volume_1,
         series_dir / "蒼藍鋼鐵戰艦 v001.kepub.epub",
         series_dir,

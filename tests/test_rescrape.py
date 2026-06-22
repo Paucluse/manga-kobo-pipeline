@@ -1,4 +1,4 @@
-"""Tests for BookWalker metadata re-scraping."""
+"""Tests for external metadata re-scraping."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from manga_pipeline.bangumi import BangumiMetadata
 from manga_pipeline.bookwalker_tw import BookwalkerMetadata
 from manga_pipeline.config import MetadataConfig, PathsConfig, PipelineConfig
 from manga_pipeline.database import Database
@@ -127,6 +128,59 @@ def test_rescrape_updates_database_and_imported_files(
             comicinfo = zf.read("ComicInfo.xml").decode("utf-8")
         assert "<Series>三隻眼 典藏版</Series>" in comicinfo
         assert "<Summary>第二卷簡介</Summary>" in comicinfo
+    finally:
+        db.close()
+
+
+def test_rescrape_falls_back_to_bangumi(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    cfg = _test_config(tmp_path)
+    db = Database(cfg.paths.state / "pipeline.db")
+    try:
+        record_id = db.insert_record(
+            MangaRecord(
+                original_path="/data/inbox/MONSTER-怪物-/Vol_01.zip",
+                file_name="MONSTER-怪物- v001.zip",
+                file_hash="monster-v1",
+                current_status=ProcessingStatus.DONE,
+                title="MONSTER-怪物-",
+                series="MONSTER-怪物-",
+                volume="1",
+                collection_title="[MONSTER-怪物-][浦沢直樹][東立][C.C][18完]",
+            )
+        )
+        record = db.get_record_by_id(record_id)
+        assert record is not None
+
+        monkeypatch.setattr("manga_pipeline.rescrape.search_bookwalker_tw", lambda *_a, **_k: None)
+        monkeypatch.setattr("manga_pipeline.rescrape.search_bookwalker_jp", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            "manga_pipeline.rescrape.search_bangumi",
+            lambda *_a, **_k: BangumiMetadata(
+                subject_id="2081",
+                title="怪物",
+                series="怪物",
+                authors=["浦泽直树"],
+                publisher="小学館",
+                summary="故事简介",
+                cover_url="https://img/monster.jpg",
+                detail_url="https://bgm.tv/subject/2081",
+                confidence=0.85,
+            ),
+        )
+        monkeypatch.setattr("manga_pipeline.rescrape._trigger_komga_scan", lambda cfg: None)
+
+        results = rescrape_records([record], cfg, db)
+
+        assert results[0].status == "updated"
+        updated = db.get_record_by_id(record_id)
+        assert updated is not None
+        assert updated.title == "怪物"
+        assert updated.series == "怪物"
+        assert updated.author == "浦泽直树"
+        assert updated.source_url == "https://bgm.tv/subject/2081"
     finally:
         db.close()
 

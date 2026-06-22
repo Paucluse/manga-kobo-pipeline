@@ -1,4 +1,4 @@
-"""Re-scrape BookWalker metadata for already imported records."""
+"""Re-scrape external metadata for already imported records."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from manga_pipeline.bangumi import BangumiMetadata, search_bangumi
+from manga_pipeline.bookwalker_jp import search_bookwalker_jp
 from manga_pipeline.bookwalker_tw import BookwalkerMetadata, search_bookwalker_tw
 from manga_pipeline.comicinfo import write_comicinfo_to_cbz
 from manga_pipeline.config import PipelineConfig
@@ -17,11 +19,15 @@ from manga_pipeline.llm_metadata import normalize_with_llm
 from manga_pipeline.logging_config import get_logger
 from manga_pipeline.models import MangaRecord, ProcessingStatus
 from manga_pipeline.pipeline import (
+    _apply_collection_title,
     _build_book_title,
     _build_clean_name,
     _build_series_name,
-    _download_bookwalker_artwork,
+    _download_metadata_artwork,
+    _metadata_matches_record_context,
+    _metadata_search_titles,
     _sanitize_dirname,
+    _title_candidate_matches_record_context,
 )
 
 logger = get_logger(__name__)
@@ -92,7 +98,7 @@ def rescrape_records(
     relocate: bool = False,
     trigger_scan: bool = True,
 ) -> list[RescrapeResult]:
-    """Re-scrape BookWalker metadata and update imported files."""
+    """Re-scrape external metadata and update imported files."""
     results: list[RescrapeResult] = []
     changed = False
 
@@ -125,13 +131,13 @@ def rescrape_record(
     record_id = record.id
     assert record_id is not None
 
-    metadata = _lookup_bookwalker(record, cfg)
+    metadata = _lookup_metadata(record, cfg)
     if metadata is None:
         return RescrapeResult(
             record_id=record_id,
             file_name=record.file_name,
             status="no_match",
-            message="BookWalker TW did not return an acceptable match",
+            message="No external metadata provider returned an acceptable match",
             old_title=record.title,
             old_series=record.series,
             old_volume=record.volume,
@@ -155,9 +161,15 @@ def rescrape_record(
         result.status = "would_update"
         return result
 
+    archive_path = _find_archive_cbz(record, cfg)
+    if archive_path and relocate:
+        archive_path = _relocate_archive_cbz(archive_path, updated, cfg)
+        updated = replace(updated, archive_path=str(archive_path))
+
     epub_path = _find_imported_epub(record, cfg)
     if epub_path and relocate:
         epub_path = _relocate_imported_epub(epub_path, updated, cfg)
+        updated = replace(updated, converted_path=str(epub_path))
 
     _rewrite_record_files(updated, cfg, epub_path)
     db.update_status(
@@ -174,19 +186,27 @@ def rescrape_record(
         isbn=updated.isbn,
         page_count=updated.page_count,
         confidence=str(updated.confidence),
+        archive_path=str(archive_path) if archive_path else record.archive_path,
         converted_path=str(epub_path) if epub_path else record.converted_path,
         library_book_id=_build_series_name(updated) or record.library_book_id,
     )
     return result
 
 
-def _lookup_bookwalker(
+def _lookup_metadata(
     record: MangaRecord,
     cfg: PipelineConfig,
-) -> BookwalkerMetadata | None:
+) -> BookwalkerMetadata | BangumiMetadata | None:
     parsed = parse_filename(record.file_name)
+    if record.collection_title:
+        _apply_collection_title(parsed, record.collection_title)
     try:
-        llm_metadata = normalize_with_llm(record.file_name, parsed, cfg.metadata)
+        source_name = (
+            f"{record.collection_title} {record.file_name}"
+            if record.collection_title
+            else record.file_name
+        )
+        llm_metadata = normalize_with_llm(source_name, parsed, cfg.metadata)
     except Exception as e:
         logger.warning("[ID:%s] LLM filename normalization failed: %s", record.id, e)
         llm_metadata = None
@@ -197,41 +217,132 @@ def _lookup_bookwalker(
         parsed.author = llm_metadata.author or parsed.author
         parsed.publisher = llm_metadata.publisher or parsed.publisher
         parsed.volume = llm_metadata.volume or parsed.volume
+        if record.collection_title:
+            _apply_collection_title(parsed, record.collection_title)
 
-    title = parsed.title or record.title or record.series
     volume = parsed.volume or record.volume
     author = parsed.author or record.author
-
-    if not cfg.metadata.bookwalker_tw_enabled or not title:
+    titles = _metadata_search_titles(parsed, record, llm_metadata, "tw")
+    if not titles:
         return None
 
-    metadata = search_bookwalker_tw(
-        title,
-        volume=volume,
-        author=author,
-        max_candidates=cfg.metadata.bookwalker_tw_max_candidates,
-    )
-    if metadata is None:
-        return None
-    if metadata.confidence < cfg.metadata.bookwalker_tw_min_confidence:
-        logger.info(
-            "[ID:%s] BookWalker TW match below threshold: %.2f < %.2f",
-            record.id,
-            metadata.confidence,
+    if cfg.metadata.bookwalker_tw_enabled:
+        metadata = _search_provider_titles(
+            record,
+            "BookWalker TW",
+            search_bookwalker_tw,
+            titles,
+            volume,
+            author,
             cfg.metadata.bookwalker_tw_min_confidence,
+            cfg.metadata.bookwalker_tw_max_candidates,
         )
-        return None
-    return metadata
+        if metadata:
+            return metadata
+
+    if cfg.metadata.bookwalker_jp_enabled:
+        metadata = _search_provider_titles(
+            record,
+            "BookWalker JP",
+            search_bookwalker_jp,
+            _metadata_search_titles(parsed, record, llm_metadata, "jp"),
+            volume,
+            author,
+            cfg.metadata.bookwalker_jp_min_confidence,
+            cfg.metadata.bookwalker_jp_max_candidates,
+        )
+        if metadata:
+            return metadata
+
+    if cfg.metadata.bangumi_enabled:
+        metadata = _search_provider_titles(
+            record,
+            "Bangumi",
+            search_bangumi,
+            _metadata_search_titles(parsed, record, llm_metadata, "jp"),
+            volume,
+            author,
+            cfg.metadata.bangumi_min_confidence,
+            cfg.metadata.bangumi_max_candidates,
+        )
+        if metadata:
+            return metadata
+
+    return None
+
+
+def _search_provider_titles(
+    record: MangaRecord,
+    provider_name: str,
+    search_func: object,
+    titles: list[str],
+    volume: str,
+    author: str,
+    min_confidence: float,
+    max_candidates: int,
+) -> BookwalkerMetadata | BangumiMetadata | None:
+    best: BookwalkerMetadata | BangumiMetadata | None = None
+    parsed = parse_filename(record.file_name)
+    if record.collection_title:
+        _apply_collection_title(parsed, record.collection_title)
+    for title in titles:
+        if not _title_candidate_matches_record_context(title, parsed, record):
+            continue
+        try:
+            metadata = search_func(
+                title,
+                volume=volume,
+                author=author,
+                max_candidates=max_candidates,
+            )
+        except Exception as e:
+            logger.warning(
+                "[ID:%s] %s lookup failed for %s: %s",
+                record.id,
+                provider_name,
+                title,
+                e,
+            )
+            continue
+        if metadata is None:
+            continue
+        if not _metadata_matches_record_context(metadata, parsed, record):
+            logger.info(
+                "[ID:%s] %s rejected context mismatch: %s",
+                record.id,
+                provider_name,
+                metadata.series or metadata.title,
+            )
+            continue
+        if best is None or metadata.confidence > best.confidence:
+            best = metadata
+        if metadata.confidence >= min_confidence:
+            return metadata
+
+    if best:
+        if best.confidence >= min_confidence:
+            return best
+        logger.info(
+            "[ID:%s] %s match below threshold: %.2f < %.2f",
+            record.id,
+            provider_name,
+            best.confidence,
+            min_confidence,
+        )
+    return None
 
 
 def _record_with_metadata(
     record: MangaRecord,
-    metadata: BookwalkerMetadata,
+    metadata: BookwalkerMetadata | BangumiMetadata,
 ) -> MangaRecord:
+    title = metadata.series or record.title
+    series = metadata.series or record.series or record.title
+
     return replace(
         record,
-        title=metadata.series or record.title,
-        series=metadata.series or record.series or record.title,
+        title=title,
+        series=series,
         volume=metadata.volume or record.volume,
         author=metadata.author_text or record.author,
         publisher=metadata.publisher or record.publisher,
@@ -276,7 +387,7 @@ def _rewrite_record_files(
             summary=record.summary,
             manga=cfg.kobo.manga_style,
         )
-        _download_bookwalker_artwork(record, epub_path, epub_path.parent, cfg)
+        _download_metadata_artwork(record, epub_path, epub_path.parent, cfg)
 
 
 def _find_imported_epub(record: MangaRecord, cfg: PipelineConfig) -> Path | None:
@@ -302,6 +413,41 @@ def _find_imported_epub(record: MangaRecord, cfg: PipelineConfig) -> Path | None
             return matches[0]
 
     return None
+
+
+def _find_archive_cbz(record: MangaRecord, cfg: PipelineConfig) -> Path | None:
+    candidates: list[Path] = []
+    if record.archive_path:
+        candidates.append(Path(record.archive_path))
+
+    names = []
+    if record.archive_path:
+        names.append(Path(record.archive_path).name)
+    if record.converted_path:
+        names.append(Path(record.converted_path).with_suffix(".cbz").name)
+
+    for name in dict.fromkeys(names):
+        candidates.append(cfg.paths.archive_cbz / name)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _relocate_archive_cbz(
+    archive_path: Path,
+    record: MangaRecord,
+    cfg: PipelineConfig,
+) -> Path:
+    dest_path = cfg.paths.archive_cbz / f"{_build_clean_name(record)}.cbz"
+    if archive_path == dest_path:
+        return archive_path
+    if dest_path.exists():
+        raise FileExistsError(f"Destination already exists: {dest_path}")
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(archive_path), str(dest_path))
+    return dest_path
 
 
 def _relocate_imported_epub(

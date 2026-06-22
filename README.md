@@ -5,24 +5,25 @@
 把 ZIP / CBZ / RAR / CBR / 7Z 漫画放入 `inbox` 后，管线会自动完成：
 
 1. 解析文件名，识别系列、卷号、作者。
-2. 可选用 LLM 对文件名结果做前置规范化。
+2. 可选用 LLM 对文件名结果做前置规范化，并生成台版/日版检索标题候选。
 3. 使用 BookWalker 台湾检索繁体中文元数据、封面、作者、出版社、ISBN、简介。
+   BookWalker 台湾无可接受匹配时尝试 BookWalker 日本；两者都失败时使用 Bangumi 兜底。
 4. 归一化为 CBZ，并写入 `ComicInfo.xml`。
 5. 使用 KCC 转换为 Kobo 适用的 `*.kepub.epub`。
 6. 写入 EPUB/KEPUB 内置 OPF 元数据。
 7. 导入 Komga 书库目录并触发 Komga 扫描。
 
-项目不依赖 Komf。元数据来源以 BookWalker 台湾为准。
+项目不依赖 Komf。元数据来源链路为 BookWalker 台湾 -> BookWalker 日本 -> Bangumi。
 
 ## 元数据规则
 
-- **系列名称**：优先使用 BookWalker 台湾返回的系列名，例如 `蒼藍鋼鐵戰艦`。
-- **系列封面**：使用 BookWalker 封面生成 Komga 本地 `cover.jpg`。如果先导入的不是第 1 卷，后续第 1 卷进入时会覆盖系列封面；非第 1 卷不会覆盖已有系列封面。
+- **系列名称**：优先使用达标元数据源返回的正式系列名，例如 `蒼藍鋼鐵戰艦` 或日版正式名。合集目录名只作为检索和无命中时的兜底解析来源。
+- **系列封面**：使用外部元数据封面生成 Komga 本地 `cover.jpg`。如果先导入的不是第 1 卷，后续第 1 卷进入时会覆盖系列封面；非第 1 卷不会覆盖已有系列封面。
 - **系列简介**：不强制写入。Komga 中系列介绍可以为空，避免把某一卷简介误当成系列简介。
-- **单本封面**：每本书使用它自己在 BookWalker 台湾页面上的封面，写成 Komga 可识别的同名 `.jpg` sidecar。
-- **单本信息**：每本书的标题、卷号、作者、出版社、简介、ISBN、来源 URL 等以实际 BookWalker 台湾条目为准。
+- **单本封面**：每本书使用外部元数据封面，写成 Komga 可识别的同名 `.jpg` sidecar。
+- **单本信息**：每本书的标题、卷号、作者、出版社、简介、ISBN、来源 URL 等以第一个达标来源为准：BookWalker 台湾优先，其次 BookWalker 日本，最后 Bangumi。
 - **命名**：导入 Komga 的文件名使用 `系列名 v001.kepub.epub` 这种稳定排序格式；显示标题写入元数据为 `系列名 卷1`。
-- **简繁转换**：BookWalker 台湾查询前会把中文标题转换为台繁，并同时尝试 `2`、`02`、不带卷号等查询，提升台版条目的命中率。
+- **检索候选**：BookWalker 台湾查询前会把中文标题转换为台繁；LLM 开启时会额外提供台版/日版正式名和查询别名，例如 `DNA` -> `D・N・A2`。
 
 ## 目录约定
 
@@ -194,7 +195,7 @@ docker compose exec manga-pipeline manga-pipeline status
 系列名 卷1.zip
 ```
 
-BookWalker 台湾命中后会覆盖文件名里的简体/非官方标题。例如 `苍蓝钢铁战舰 卷1.cbz` 会规范成 `蒼藍鋼鐵戰艦 v001.kepub.epub`，显示标题为 `蒼藍鋼鐵戰艦 卷1`。
+元数据源命中后会覆盖文件名里的简体/非官方标题。例如 `苍蓝钢铁战舰 卷1.cbz` 命中 BookWalker 台湾后会规范成 `蒼藍鋼鐵戰艦 v001.kepub.epub`，显示标题为 `蒼藍鋼鐵戰艦 卷1`。
 
 ## 配置说明
 
@@ -222,6 +223,12 @@ metadata:
   bookwalker_tw_enabled: true
   bookwalker_tw_min_confidence: 0.65
   bookwalker_tw_max_candidates: 8
+  bookwalker_jp_enabled: true
+  bookwalker_jp_min_confidence: 0.65
+  bookwalker_jp_max_candidates: 8
+  bangumi_enabled: true
+  bangumi_min_confidence: 0.65
+  bangumi_max_candidates: 8
   download_bookwalker_covers: true
   llm_normalize_enabled: true
   llm_base_url: https://generativelanguage.googleapis.com/v1beta/openai
@@ -297,10 +304,10 @@ ruff check src tests
 ## 注意事项
 
 - `data/`、`.env`、`config.yaml`、数据库和日志不会提交到仓库。
-- BookWalker 台湾没有对应条目时，管线会保留文件名解析结果。
+- BookWalker 台湾没有可接受条目时，管线会尝试 BookWalker 日本；日本站也没有达标时再尝试 Bangumi；都没有达标时才保留文件名解析结果。
 - PDF 默认用 `pdfimages` 直接抽取内嵌图片，避免整页重渲染导致速度慢和体积暴涨。
 - `pdftoppm` 只作为显式启用的渲染 fallback；默认不自动回退。
-- LLM 只做文件名前置规范化，不直接替代 BookWalker 台湾的书籍元数据。
+- LLM 只做文件名前置规范化和检索候选生成，不直接替代外部书籍元数据。
 - 同一个文件内容会按 SHA-256 去重，重复放入不会再次处理。
 
 ## License

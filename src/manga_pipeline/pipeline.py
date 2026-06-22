@@ -10,9 +10,13 @@ import contextlib
 import fcntl
 import re
 import shutil
+import unicodedata
 from pathlib import Path
 
+from manga_pipeline.bangumi import search_bangumi
+from manga_pipeline.bookwalker_jp import search_bookwalker_jp
 from manga_pipeline.bookwalker_tw import (
+    BookwalkerMetadata,
     download_cover,
     search_bookwalker_tw,
     to_bookwalker_traditional,
@@ -24,7 +28,7 @@ from manga_pipeline.epub_metadata import write_epub_metadata
 from manga_pipeline.filename_parser import ParseResult, parse_filename
 from manga_pipeline.kcc import run_kcc
 from manga_pipeline.komga import get_library_id, trigger_library_scan
-from manga_pipeline.llm_metadata import normalize_with_llm
+from manga_pipeline.llm_metadata import LlmMetadata, normalize_with_llm
 from manga_pipeline.logging_config import get_logger
 from manga_pipeline.models import MangaRecord, ProcessingStatus
 from manga_pipeline.normalizer import normalize_to_cbz
@@ -294,6 +298,341 @@ def _advance_record(
     return False
 
 
+def _search_bookwalker_tw_metadata(
+    record_id: int,
+    parsed: ParseResult,
+    record: MangaRecord,
+    llm_metadata: LlmMetadata | None,
+    cfg: PipelineConfig,
+) -> BookwalkerMetadata | None:
+    if not cfg.metadata.bookwalker_tw_enabled:
+        return None
+    return _search_best_bookwalker_metadata(
+        record_id=record_id,
+        provider_name="BookWalker TW",
+        search_func=search_bookwalker_tw,
+        titles=_metadata_search_titles(parsed, record, llm_metadata, "tw"),
+        parsed=parsed,
+        record=record,
+        volume=parsed.volume,
+        author=parsed.author,
+        min_confidence=cfg.metadata.bookwalker_tw_min_confidence,
+        max_candidates=cfg.metadata.bookwalker_tw_max_candidates,
+    )
+
+
+def _search_bookwalker_jp_metadata(
+    record_id: int,
+    parsed: ParseResult,
+    record: MangaRecord,
+    llm_metadata: LlmMetadata | None,
+    cfg: PipelineConfig,
+) -> BookwalkerMetadata | None:
+    if not cfg.metadata.bookwalker_jp_enabled:
+        return None
+    return _search_best_bookwalker_metadata(
+        record_id=record_id,
+        provider_name="BookWalker JP",
+        search_func=search_bookwalker_jp,
+        titles=_metadata_search_titles(parsed, record, llm_metadata, "jp"),
+        parsed=parsed,
+        record=record,
+        volume=parsed.volume,
+        author=parsed.author,
+        min_confidence=cfg.metadata.bookwalker_jp_min_confidence,
+        max_candidates=cfg.metadata.bookwalker_jp_max_candidates,
+    )
+
+
+def _search_best_bookwalker_metadata(
+    record_id: int,
+    provider_name: str,
+    search_func: object,
+    titles: list[str],
+    parsed: ParseResult,
+    record: MangaRecord,
+    volume: str,
+    author: str,
+    min_confidence: float,
+    max_candidates: int,
+) -> BookwalkerMetadata | None:
+    best: BookwalkerMetadata | None = None
+    for title in titles:
+        if not _title_candidate_matches_record_context(title, parsed, record):
+            continue
+        try:
+            metadata = search_func(
+                title,
+                volume=volume,
+                author=author,
+                max_candidates=max_candidates,
+            )
+        except Exception as e:
+            logger.warning(
+                "[ID:%s] %s lookup failed for %s: %s",
+                record_id,
+                provider_name,
+                title,
+                e,
+            )
+            continue
+        if metadata is None:
+            continue
+        if not _metadata_matches_record_context(metadata, parsed, record):
+            logger.info(
+                "[ID:%s] %s rejected context mismatch: %s",
+                record_id,
+                provider_name,
+                metadata.series or metadata.title,
+            )
+            continue
+        if best is None or metadata.confidence > best.confidence:
+            best = metadata
+        if metadata.confidence >= min_confidence:
+            return metadata
+
+    if best is not None:
+        if best.confidence >= min_confidence:
+            return best
+        logger.info(
+            "[ID:%s] %s match below threshold: %.2f < %.2f",
+            record_id,
+            provider_name,
+            best.confidence,
+            min_confidence,
+        )
+    return None
+
+
+def _search_bangumi_metadata(
+    record_id: int,
+    parsed: ParseResult,
+    record: MangaRecord,
+    llm_metadata: LlmMetadata | None,
+    cfg: PipelineConfig,
+):
+    if not cfg.metadata.bangumi_enabled:
+        return None
+
+    best = None
+    for title in _metadata_search_titles(parsed, record, llm_metadata, "jp"):
+        if not _title_candidate_matches_record_context(title, parsed, record):
+            continue
+        try:
+            metadata = search_bangumi(
+                title,
+                volume=parsed.volume,
+                author=parsed.author,
+                max_candidates=cfg.metadata.bangumi_max_candidates,
+            )
+        except Exception as e:
+            logger.warning("[ID:%s] Bangumi lookup failed for %s: %s", record_id, title, e)
+            continue
+        if metadata is None:
+            continue
+        if not _metadata_matches_record_context(metadata, parsed, record):
+            logger.info(
+                "[ID:%s] Bangumi rejected context mismatch: %s",
+                record_id,
+                metadata.series or metadata.title,
+            )
+            continue
+        if best is None or metadata.confidence > best.confidence:
+            best = metadata
+        if metadata.confidence >= cfg.metadata.bangumi_min_confidence:
+            return metadata
+
+    if best is not None:
+        if best.confidence >= cfg.metadata.bangumi_min_confidence:
+            return best
+        logger.info(
+            "[ID:%s] Bangumi match below threshold: %.2f < %.2f",
+            record_id,
+            best.confidence,
+            cfg.metadata.bangumi_min_confidence,
+        )
+    return None
+
+
+def _metadata_search_titles(
+    parsed: ParseResult,
+    record: MangaRecord,
+    llm_metadata: LlmMetadata | None,
+    provider: str,
+) -> list[str]:
+    titles: list[str] = []
+    if llm_metadata:
+        if provider == "tw":
+            titles.extend([llm_metadata.title_tw, llm_metadata.title])
+        else:
+            titles.extend([llm_metadata.title_jp, llm_metadata.title])
+        titles.extend(llm_metadata.search_titles or [])
+    titles.extend([parsed.title, parsed.series])
+    if record.collection_title:
+        collection = _parse_collection_title(record.collection_title)
+        titles.extend([collection.title, record.collection_title])
+
+    result: list[str] = []
+    for title in titles:
+        title = title.strip()
+        if title and title not in result:
+            result.append(title)
+        for alias in _metadata_title_aliases(title, provider):
+            if alias not in result:
+                result.append(alias)
+    return result[:8]
+
+
+def _metadata_title_aliases(title: str, provider: str) -> list[str]:
+    key = _title_key(title)
+    aliases: list[str] = []
+    if provider != "tw" and key == "dna2":
+        aliases.append(
+            "D・N・A2 "
+            "\N{FULLWIDTH TILDE}"
+            "何処かで失くしたあいつのアイツ"
+            "\N{FULLWIDTH TILDE}"
+        )
+    return aliases
+
+
+def _metadata_matches_record_context(
+    metadata: object,
+    parsed: ParseResult,
+    record: MangaRecord,
+) -> bool:
+    """Reject provider false positives that conflict with a collection folder."""
+    if not record.collection_title:
+        return True
+
+    collection = _parse_collection_title(record.collection_title)
+    expected_title = collection.title or parsed.series or parsed.title
+    if not expected_title:
+        return True
+
+    metadata_title = " ".join(
+        [
+            str(getattr(metadata, "series", "") or ""),
+            str(getattr(metadata, "title", "") or ""),
+        ]
+    )
+    if not metadata_title.strip():
+        return True
+
+    expected_markers = _edition_markers(expected_title)
+    actual_markers = _edition_markers(metadata_title)
+    if expected_markers and not expected_markers.issubset(actual_markers):
+        return False
+    if expected_markers and actual_markers - expected_markers:
+        return False
+
+    expected_keys = _title_match_keys(expected_title)
+    actual_key = _title_key(metadata_title)
+    if not expected_keys or not actual_key:
+        return True
+
+    return any(key in actual_key or actual_key in key for key in expected_keys)
+
+
+def _title_candidate_matches_record_context(
+    title: str,
+    parsed: ParseResult,
+    record: MangaRecord,
+) -> bool:
+    """Return whether a search title is worth querying for this record."""
+    if not record.collection_title:
+        return True
+
+    collection = _parse_collection_title(record.collection_title)
+    expected_title = collection.title or parsed.series or parsed.title
+    if not expected_title or not title:
+        return True
+
+    expected_markers = _edition_markers(expected_title)
+    actual_markers = _edition_markers(title)
+    if expected_markers and not expected_markers.issubset(actual_markers):
+        return False
+    if expected_markers and actual_markers - expected_markers:
+        return False
+
+    expected_keys = _title_match_keys(expected_title)
+    actual_key = _title_key(title)
+    if not expected_keys or not actual_key:
+        return True
+    return any(key in actual_key or actual_key in key for key in expected_keys)
+
+
+def _title_match_keys(title: str) -> list[str]:
+    title = _strip_edition_markers(title)
+    parts = [title]
+    parts.extend(re.split(r"[\s_\-./・:\uFF1A~\u301C]+", title))
+    keys: list[str] = []
+    for part in parts:
+        key = _title_key(part)
+        if len(key) >= 2 and key not in keys:
+            keys.append(key)
+        for alias in _title_aliases(key):
+            if alias not in keys:
+                keys.append(alias)
+    return keys
+
+
+def _title_key(value: str) -> str:
+    value = to_bookwalker_traditional(_strip_edition_markers(value))
+    value = unicodedata.normalize("NFKC", value).replace("²", "2")
+    return re.sub(
+        r"[\s_\-./・()\uFF08\uFF09【】\[\]:\uFF1A~\u301C]+",
+        "",
+        value.casefold(),
+    )
+
+
+def _title_aliases(key: str) -> list[str]:
+    aliases: dict[str, tuple[str, ...]] = {
+        "slamdunk": ("灌籃高手",),
+        "灌籃高手": ("slamdunk",),
+        "灌篮高手": ("slamdunk",),
+    }
+    return list(aliases.get(key, ()))
+
+
+def _edition_markers(value: str) -> set[str]:
+    value = to_bookwalker_traditional(value)
+    markers: set[str] = set()
+    marker_groups = {
+        "complete": ("完全版",),
+        "collector": ("典藏版", "典藏"),
+        "new": ("新裝再編版", "新裝", "再編"),
+        "deluxe": ("豪華版", "豪華"),
+        "bunkoban": ("文庫版", "文庫"),
+        "aizoban": ("愛藏版", "愛藏"),
+    }
+    for key, aliases in marker_groups.items():
+        if any(alias in value for alias in aliases):
+            markers.add(key)
+    return markers
+
+
+def _strip_edition_markers(value: str) -> str:
+    value = to_bookwalker_traditional(value)
+    for marker in (
+        "完全版",
+        "典藏版",
+        "新裝再編版",
+        "豪華版",
+        "文庫版",
+        "愛藏版",
+        "典藏",
+        "新裝",
+        "再編",
+        "豪華",
+        "文庫",
+        "愛藏",
+    ):
+        value = value.replace(marker, " ")
+    return value
+
+
 def _step_parse_metadata(
     record_id: int,
     record: MangaRecord,
@@ -332,24 +671,16 @@ def _step_parse_metadata(
         if record.collection_title:
             _apply_collection_title(parsed, record.collection_title)
 
-    bookwalker = None
-    accepted_bookwalker = None
-    if cfg.metadata.bookwalker_tw_enabled and parsed.title:
-        try:
-            bookwalker = search_bookwalker_tw(
-                parsed.title,
-                volume=parsed.volume,
-                author=parsed.author,
-                max_candidates=cfg.metadata.bookwalker_tw_max_candidates,
-            )
-        except Exception as e:
-            logger.warning("[ID:%s] BookWalker TW lookup failed: %s", record_id, e)
-
-    if (
-        bookwalker is not None
-        and bookwalker.confidence >= cfg.metadata.bookwalker_tw_min_confidence
-    ):
-        accepted_bookwalker = bookwalker
+    accepted_metadata = None
+    bookwalker = _search_bookwalker_tw_metadata(
+        record_id,
+        parsed,
+        record,
+        llm_metadata,
+        cfg,
+    )
+    if bookwalker is not None:
+        accepted_metadata = bookwalker
         logger.info(
             "[ID:%s] BookWalker TW matched %s (confidence=%.2f, product=%s)",
             record_id,
@@ -363,6 +694,53 @@ def _step_parse_metadata(
         parsed.author = bookwalker.author_text or parsed.author
         parsed.publisher = bookwalker.publisher or parsed.publisher
         parsed.confidence = max(parsed.confidence, bookwalker.confidence)
+    else:
+        bookwalker_jp = _search_bookwalker_jp_metadata(
+            record_id,
+            parsed,
+            record,
+            llm_metadata,
+            cfg,
+        )
+        if bookwalker_jp is not None:
+            accepted_metadata = bookwalker_jp
+            logger.info(
+                "[ID:%s] BookWalker JP matched %s (confidence=%.2f, product=%s)",
+                record_id,
+                bookwalker_jp.title,
+                bookwalker_jp.confidence,
+                bookwalker_jp.product_id,
+            )
+            parsed.title = bookwalker_jp.series or parsed.title
+            parsed.series = bookwalker_jp.series or parsed.series or parsed.title
+            parsed.volume = bookwalker_jp.volume or parsed.volume
+            parsed.author = bookwalker_jp.author_text or parsed.author
+            parsed.publisher = bookwalker_jp.publisher or parsed.publisher
+            parsed.confidence = max(parsed.confidence, bookwalker_jp.confidence)
+
+    if accepted_metadata is None:
+        bangumi = _search_bangumi_metadata(
+            record_id,
+            parsed,
+            record,
+            llm_metadata,
+            cfg,
+        )
+        if bangumi is not None:
+            accepted_metadata = bangumi
+            logger.info(
+                "[ID:%s] Bangumi matched %s (confidence=%.2f, subject=%s)",
+                record_id,
+                bangumi.title,
+                bangumi.confidence,
+                bangumi.subject_id,
+            )
+            parsed.title = bangumi.series or parsed.title
+            parsed.series = bangumi.series or parsed.series or parsed.title
+            parsed.volume = bangumi.volume or parsed.volume
+            parsed.author = bangumi.author_text or parsed.author
+            parsed.publisher = bangumi.publisher or parsed.publisher
+            parsed.confidence = max(parsed.confidence, bangumi.confidence)
 
     logger.info(
         "[ID:%s] Parsed %s: title=%s, author=%s, vol=%s (confidence=%.2f)",
@@ -412,11 +790,11 @@ def _step_parse_metadata(
         series=parsed.series,
         volume=parsed.volume,
         publisher=parsed.publisher,
-        summary=accepted_bookwalker.summary if accepted_bookwalker else "",
-        cover_url=accepted_bookwalker.cover_url if accepted_bookwalker else "",
-        source_url=accepted_bookwalker.detail_url if accepted_bookwalker else "",
-        isbn=accepted_bookwalker.isbn if accepted_bookwalker else "",
-        page_count=accepted_bookwalker.page_count if accepted_bookwalker else "",
+        summary=accepted_metadata.summary if accepted_metadata else "",
+        cover_url=accepted_metadata.cover_url if accepted_metadata else "",
+        source_url=accepted_metadata.detail_url if accepted_metadata else "",
+        isbn=accepted_metadata.isbn if accepted_metadata else "",
+        page_count=accepted_metadata.page_count if accepted_metadata else "",
         confidence=str(parsed.confidence),
     )
     return True
@@ -430,7 +808,7 @@ def _step_normalize_and_archive(
 ) -> bool:
     """Normalize archive format and archive the CBZ."""
     file_path = Path(record.original_path)
-    if not file_path.is_file():
+    if not file_path.exists():
         db.update_status(
             record_id,
             ProcessingStatus.FAILED,
@@ -597,7 +975,7 @@ def _step_import_komga(
     try:
         # Move (or copy + delete) the converted file into the Komga library
         shutil.move(str(converted_path), str(dest_path))
-        _download_bookwalker_artwork(record, dest_path, series_dir, cfg)
+        _download_metadata_artwork(record, dest_path, series_dir, cfg)
         logger.info(
             "[ID:%s] Moved to Komga library: %s -> %s",
             record_id,
@@ -792,26 +1170,26 @@ def _sanitize_dirname(name: str) -> str:
     return name.strip() or "Unknown"
 
 
-def _download_bookwalker_artwork(
+def _download_metadata_artwork(
     record: MangaRecord,
     dest_path: Path,
     series_dir: Path,
     cfg: PipelineConfig,
 ) -> None:
-    """Download BookWalker cover art as Komga local artwork sidecars."""
+    """Download metadata provider cover art as Komga local artwork sidecars."""
     if not cfg.metadata.download_bookwalker_covers or not record.cover_url:
         return
 
     book_cover_path = dest_path.with_suffix(".jpg")
     if download_cover(record.cover_url, book_cover_path):
-        logger.info("Downloaded BookWalker book cover: %s", book_cover_path.name)
+        logger.info("Downloaded book cover: %s", book_cover_path.name)
 
     series_cover_path = series_dir / "cover.jpg"
     should_update_series_cover = (
         not series_cover_path.exists() or _is_first_volume(record.volume)
     )
     if should_update_series_cover and download_cover(record.cover_url, series_cover_path):
-        logger.info("Downloaded BookWalker series cover: %s", series_cover_path.name)
+        logger.info("Downloaded series cover: %s", series_cover_path.name)
 
 
 def _is_first_volume(volume: str) -> bool:

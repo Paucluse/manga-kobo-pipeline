@@ -67,4 +67,5 @@ SUPPORTED_EXTENSIONS: set[str] = {
     ".rar", ".cbr",
     ".7z",
     ".pdf",
+    ".epub",
 }

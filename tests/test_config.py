@@ -53,6 +53,11 @@ class TestPipelineConfigDefaults:
         assert cfg.metadata.confidence_auto_accept == 0.4
         assert cfg.metadata.bookwalker_tw_enabled is True
         assert cfg.metadata.bookwalker_tw_min_confidence == 0.65
+        assert cfg.metadata.bookwalker_jp_enabled is True
+        assert cfg.metadata.bookwalker_jp_min_confidence == 0.65
+        assert cfg.metadata.bangumi_enabled is True
+        assert cfg.metadata.bangumi_min_confidence == 0.65
+        assert cfg.metadata.bangumi_max_candidates == 30
         assert cfg.metadata.download_bookwalker_covers is True
         assert cfg.metadata.llm_normalize_enabled is False
         assert cfg.metadata.llm_api_key_file is None

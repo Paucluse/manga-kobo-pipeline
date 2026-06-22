@@ -10,13 +10,17 @@ Handles normalization of different archive formats:
 
 from __future__ import annotations
 
+import html
+import posixpath
 import re
 import shutil
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urldefrag
 
 from manga_pipeline.config import PdfConfig
 from manga_pipeline.logging_config import get_logger
@@ -25,6 +29,11 @@ logger = get_logger(__name__)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 PDFIMAGE_EXTENSIONS = IMAGE_EXTENSIONS | {".jp2", ".jbig2", ".ppm", ".pbm", ".pgm"}
+EPUB_IMAGE_EXTENSIONS = IMAGE_EXTENSIONS | {".svg"}
+EPUB_IMAGE_REF_RE = re.compile(
+    r"""(?:src|href|xlink:href)\s*=\s*["']([^"']+)["']""",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -94,6 +103,9 @@ def normalize_to_cbz(
             pdfimages_cmd,
             pdftoppm_cmd,
         )
+
+    if suffix == ".epub":
+        return _normalize_epub_to_cbz(input_path, output_path)
 
     if input_path.is_dir():
         return _pack_directory_to_cbz(input_path, output_path)
@@ -168,6 +180,120 @@ def _pack_directory_to_cbz(
 
     logger.info("Packed to: %s", output_path.name)
     return output_path
+
+
+def _normalize_epub_to_cbz(epub_path: Path, output_path: Path) -> Path:
+    """Extract image pages from an EPUB and pack them as a CBZ."""
+    logger.info("Extracting EPUB images -> CBZ: %s", epub_path.name)
+
+    try:
+        with zipfile.ZipFile(epub_path) as epub:
+            image_paths = _epub_ordered_image_paths(epub)
+            if not image_paths:
+                image_paths = _epub_fallback_image_paths(epub)
+            if not image_paths:
+                msg = "EPUB contains no extractable image pages"
+                raise ValueError(msg)
+
+            with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as cbz:
+                for index, image_path in enumerate(image_paths, start=1):
+                    suffix = Path(image_path).suffix.lower()
+                    cbz.writestr(f"{index:04d}{suffix}", epub.read(image_path))
+    except zipfile.BadZipFile as e:
+        msg = f"Invalid EPUB archive: {epub_path}"
+        raise ValueError(msg) from e
+
+    logger.info("Extracted EPUB to: %s", output_path.name)
+    return output_path
+
+
+def _epub_ordered_image_paths(epub: zipfile.ZipFile) -> list[str]:
+    rootfile = _epub_rootfile_path(epub)
+    if not rootfile:
+        return []
+
+    try:
+        root = ET.fromstring(epub.read(rootfile))
+    except (ET.ParseError, KeyError):
+        return []
+
+    manifest: dict[str, str] = {}
+    spine: list[str] = []
+    opf_dir = posixpath.dirname(rootfile)
+    names = set(epub.namelist())
+
+    for item in root.findall(".//{*}manifest/{*}item"):
+        item_id = item.get("id")
+        href = item.get("href")
+        if item_id and href:
+            manifest[item_id] = _resolve_epub_path(opf_dir, href)
+
+    for itemref in root.findall(".//{*}spine/{*}itemref"):
+        idref = itemref.get("idref")
+        if idref:
+            spine.append(idref)
+
+    image_paths: list[str] = []
+    seen: set[str] = set()
+    for idref in spine:
+        item_path = manifest.get(idref, "")
+        for image_path in _epub_images_from_spine_item(epub, item_path, names):
+            if image_path not in seen:
+                image_paths.append(image_path)
+                seen.add(image_path)
+
+    return image_paths
+
+
+def _epub_rootfile_path(epub: zipfile.ZipFile) -> str:
+    try:
+        container = ET.fromstring(epub.read("META-INF/container.xml"))
+    except (ET.ParseError, KeyError):
+        return ""
+
+    rootfile = container.find(".//{*}rootfile")
+    if rootfile is None:
+        return ""
+    return rootfile.get("full-path", "")
+
+
+def _epub_images_from_spine_item(
+    epub: zipfile.ZipFile,
+    item_path: str,
+    names: set[str],
+) -> list[str]:
+    if not item_path:
+        return []
+    if Path(item_path).suffix.lower() in EPUB_IMAGE_EXTENSIONS and item_path in names:
+        return [item_path]
+    if item_path not in names:
+        return []
+
+    try:
+        text = epub.read(item_path).decode("utf-8", errors="ignore")
+    except KeyError:
+        return []
+
+    item_dir = posixpath.dirname(item_path)
+    image_paths: list[str] = []
+    for match in EPUB_IMAGE_REF_RE.finditer(text):
+        image_path = _resolve_epub_path(item_dir, match.group(1))
+        if image_path in names and Path(image_path).suffix.lower() in EPUB_IMAGE_EXTENSIONS:
+            image_paths.append(image_path)
+    return image_paths
+
+
+def _epub_fallback_image_paths(epub: zipfile.ZipFile) -> list[str]:
+    return [
+        name for name in sorted(epub.namelist())
+        if Path(name).suffix.lower() in EPUB_IMAGE_EXTENSIONS
+    ]
+
+
+def _resolve_epub_path(base_dir: str, href: str) -> str:
+    clean_href, _fragment = urldefrag(html.unescape(href))
+    clean_href = unquote(clean_href)
+    return posixpath.normpath(posixpath.join(base_dir, clean_href)).lstrip("/")
 
 
 def _normalize_pdf_to_cbz(

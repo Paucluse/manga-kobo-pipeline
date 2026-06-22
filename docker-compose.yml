@@ -42,3 +42,4 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       - TZ=Asia/Shanghai
+      - SERVER_TOMCAT_RELAXEDQUERYCHARS=[,]

@@ -21,9 +21,12 @@ class LlmMetadata:
     """LLM-normalized metadata fields."""
 
     title: str = ""
+    title_tw: str = ""
+    title_jp: str = ""
     author: str = ""
     publisher: str = ""
     volume: str = ""
+    search_titles: list[str] | None = None
     confidence: float = 0.0
 
 
@@ -52,8 +55,10 @@ def normalize_with_llm(
             {
                 "role": "system",
                 "content": (
-                    "你是台湾漫画电子书文件名标准化器。只输出 JSON, 不要解释。"
-                    "全部以台湾繁体中文和台湾出版信息为准, 不使用香港版信息。"
+                    "你是漫画电子书文件名标准化器。只输出 JSON, 不要解释。"
+                    "你的任务是从可能不准确的文件名推断正式书名和检索关键词。"
+                    "优先给出台版正式书名; 如台版可能不存在, 同时给出日版正式书名。"
+                    "不要编造出版社; 不确定则留空。"
                 ),
             },
             {
@@ -68,7 +73,12 @@ def normalize_with_llm(
                             "volume": parsed.volume,
                         },
                         "output_schema": {
-                            "title": "台湾常用系列名",
+                            "title": "最适合归档的系列名, 优先台版正式名, 否则日版正式名",
+                            "title_tw": "BookWalker 台湾可能使用的正式系列名",
+                            "title_jp": "BookWalker 日本可能使用的正式系列名",
+                            "search_titles": [
+                                "用于台湾 BookWalker、日本 BookWalker、Bangumi 检索的标题候选",
+                            ],
                             "author": "作者名",
                             "publisher": "台湾出版社, 未知则空字符串",
                             "volume": "阿拉伯数字卷号, 未知则空字符串",
@@ -142,8 +152,15 @@ def _parse_llm_json(content: str) -> LlmMetadata | None:
 
     return LlmMetadata(
         title=str(data.get("title") or "").strip(),
+        title_tw=str(data.get("title_tw") or "").strip(),
+        title_jp=str(data.get("title_jp") or "").strip(),
         author=str(data.get("author") or "").strip(),
         publisher=str(data.get("publisher") or "").strip(),
         volume=str(data.get("volume") or "").strip(),
+        search_titles=[
+            str(item).strip()
+            for item in data.get("search_titles", [])
+            if str(item).strip()
+        ] if isinstance(data.get("search_titles"), list) else None,
         confidence=float(data.get("confidence") or 0.0),
     )
