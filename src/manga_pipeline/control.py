@@ -63,7 +63,7 @@ class ControlStore:
     def __init__(self, state_dir: Path) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = state_dir / "pipeline.db"
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
 
