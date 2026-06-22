@@ -21,6 +21,7 @@ DNA2_V3 = f"{DNA2_SERIES} 3"
 
 def test_titles_match_rejects_short_title_substring_false_positive() -> None:
     assert _titles_match("銃夢", "銃夢")
+    assert _titles_match(f"銃夢{FW_LPAREN}講談社{FW_RPAREN}", "銃夢")
     assert not _titles_match("木城ゆきと画集 ARS MAGNA デビューから銃夢火星戦記まで", "銃夢")
     assert not _titles_match("銃夢火星戦記", "銃夢")
 

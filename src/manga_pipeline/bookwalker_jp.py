@@ -429,7 +429,24 @@ def _series_from_title(title: str) -> str:
         "",
         value,
     ).strip()
+    value = _strip_publisher_suffix(value)
     return value
+
+
+def _strip_publisher_suffix(value: str) -> str:
+    publishers = (
+        "KADOKAWA",
+        "講談社",
+        "集英社",
+        "小学館",
+        "秋田書店",
+        "白泉社",
+        "双葉社",
+        "スクウェア・エニックス",
+        "角川",
+    )
+    pattern = "|".join(re.escape(publisher) for publisher in publishers)
+    return re.sub(rf"\s*(?:\(({pattern})\)|\uFF08({pattern})\uFF09)$", "", value).strip()
 
 
 def _normalized(value: str) -> str:
