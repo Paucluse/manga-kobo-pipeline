@@ -125,6 +125,30 @@ def test_short_collection_title_rejects_substring_false_positive() -> None:
     assert _metadata_matches_record_context(metadata, parsed, record) is False
 
 
+def test_plain_collection_title_rejects_unrequested_edition_or_sequel() -> None:
+    record = MangaRecord(collection_title="[木城ゆきと_木城幸人][銃夢][東立][9完]")
+    parsed = parse_filename("[銃夢(第一部)[木城ゆきと][東立]Vol_09.rar")
+    _apply_collection_title(parsed, record.collection_title)
+
+    complete = BookwalkerMetadata(
+        title="銃夢 完全版 v1",
+        series="銃夢 完全版",
+        volume="1",
+        authors=["木城ゆきと"],
+        confidence=0.9,
+    )
+    last_order = BookwalkerMetadata(
+        title="銃夢 Last Order v9",
+        series="銃夢 Last Order",
+        volume="9",
+        authors=["木城ゆきと"],
+        confidence=1.0,
+    )
+
+    assert _metadata_matches_record_context(complete, parsed, record) is False
+    assert _metadata_matches_record_context(last_order, parsed, record) is False
+
+
 def test_prompt_console_schema_adds_bookwalker_jp_search_title() -> None:
     record = MangaRecord(
         file_name=(

@@ -567,11 +567,11 @@ def _metadata_matches_record_context(
     actual_markers = _edition_markers(metadata_title)
     if expected_markers and not expected_markers.issubset(actual_markers):
         return False
-    if expected_markers and actual_markers - expected_markers:
+    if actual_markers - expected_markers:
         return False
 
     expected_keys = _title_match_keys(expected_title)
-    actual_keys = _title_match_keys(metadata_title)
+    actual_keys = _metadata_primary_title_keys(metadata)
     if not expected_keys or not actual_keys:
         return True
 
@@ -596,11 +596,11 @@ def _title_candidate_matches_record_context(
     actual_markers = _edition_markers(title)
     if expected_markers and not expected_markers.issubset(actual_markers):
         return False
-    if expected_markers and actual_markers - expected_markers:
+    if actual_markers - expected_markers:
         return False
 
     expected_keys = _title_match_keys(expected_title)
-    actual_keys = _title_match_keys(title)
+    actual_keys = [_title_key(title)]
     if not expected_keys or not actual_keys:
         return True
     return _title_keys_match(expected_keys, actual_keys)
@@ -630,6 +630,15 @@ def _title_keys_match(expected_keys: list[str], actual_keys: list[str]) -> bool:
             if len(expected) >= 4 and (actual.startswith(expected) or expected.startswith(actual)):
                 return True
     return False
+
+
+def _metadata_primary_title_keys(metadata: object) -> list[str]:
+    keys: list[str] = []
+    for field in ("series", "title"):
+        key = _title_key(str(getattr(metadata, field, "") or ""))
+        if key and key not in keys:
+            keys.append(key)
+    return keys
 
 
 def _title_key(value: str) -> str:

@@ -51,7 +51,11 @@ def search_bookwalker_jp(
     queries = _build_queries(title, volume)
 
     for query in queries:
-        html_text = _request_get(SEARCH_URL.format(query=quote_plus(query)), timeout)
+        try:
+            html_text = _request_get(SEARCH_URL.format(query=quote_plus(query)), timeout)
+        except requests.RequestException as e:
+            logger.info("BookWalker JP search failed for query=%s: %s", query, e)
+            continue
         search_candidates = sorted(
             parse_search_candidates(html_text),
             key=lambda c: _score_candidate(c, title, volume, author),
