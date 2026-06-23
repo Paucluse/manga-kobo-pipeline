@@ -36,7 +36,7 @@ from manga_pipeline.epub_metadata import write_epub_metadata
 from manga_pipeline.filename_parser import ParseResult, parse_filename
 from manga_pipeline.kcc import run_kcc
 from manga_pipeline.komga import get_library_id, trigger_library_scan
-from manga_pipeline.llm_metadata import LlmMetadata, normalize_with_llm
+from manga_pipeline.llm_metadata import LlmMetadata, ScrapeVerification, normalize_with_llm, verify_scrape_with_llm
 from manga_pipeline.logging_config import get_logger
 from manga_pipeline.models import MangaRecord, ProcessingStatus
 from manga_pipeline.normalizer import normalize_to_cbz
@@ -334,6 +334,9 @@ def _search_bookwalker_tw_metadata(
         author=parsed.author,
         min_confidence=cfg.metadata.bookwalker_tw_min_confidence,
         max_candidates=cfg.metadata.bookwalker_tw_max_candidates,
+        filename=record.file_name,
+        llm_metadata=llm_metadata,
+        cfg=cfg,
     )
 
 
@@ -357,6 +360,9 @@ def _search_bookwalker_jp_metadata(
         author=parsed.author,
         min_confidence=cfg.metadata.bookwalker_jp_min_confidence,
         max_candidates=cfg.metadata.bookwalker_jp_max_candidates,
+        filename=record.file_name,
+        llm_metadata=llm_metadata,
+        cfg=cfg,
     )
 
 
@@ -371,6 +377,9 @@ def _search_best_bookwalker_metadata(
     author: str,
     min_confidence: float,
     max_candidates: int,
+    filename: str = "",
+    llm_metadata: LlmMetadata | None = None,
+    cfg: PipelineConfig | None = None,
 ) -> BookwalkerMetadata | None:
     best: BookwalkerMetadata | None = None
     for title in titles:
@@ -402,6 +411,32 @@ def _search_best_bookwalker_metadata(
                 metadata.series or metadata.title,
             )
             continue
+        # --- LLM verification ---
+        if cfg is not None and filename:
+            verification = _verify_candidate(
+                record_id, provider_name, filename, llm_metadata, metadata, cfg
+            )
+            if verification is not None and not verification.match:
+                logger.info(
+                    "[ID:%s] %s LLM rejected candidate '%s': %s",
+                    record_id,
+                    provider_name,
+                    metadata.series or metadata.title,
+                    verification.reason,
+                )
+                continue
+            if verification is not None and verification.match:
+                # Boost confidence proportional to LLM certainty
+                boost = verification.confidence * 0.15
+                metadata.confidence = min(1.0, metadata.confidence + boost)
+                logger.info(
+                    "[ID:%s] %s LLM confirmed '%s' (+%.2f boost): %s",
+                    record_id,
+                    provider_name,
+                    metadata.series or metadata.title,
+                    boost,
+                    verification.reason,
+                )
         if best is None or metadata.confidence > best.confidence:
             best = metadata
         if metadata.confidence >= min_confidence:
@@ -453,6 +488,28 @@ def _search_bangumi_metadata(
                 metadata.series or metadata.title,
             )
             continue
+        # --- LLM verification ---
+        verification = _verify_candidate(
+            record_id, "Bangumi", record.file_name, llm_metadata, metadata, cfg
+        )
+        if verification is not None and not verification.match:
+            logger.info(
+                "[ID:%s] Bangumi LLM rejected candidate '%s': %s",
+                record_id,
+                metadata.series or metadata.title,
+                verification.reason,
+            )
+            continue
+        if verification is not None and verification.match:
+            boost = verification.confidence * 0.15
+            metadata.confidence = min(1.0, metadata.confidence + boost)
+            logger.info(
+                "[ID:%s] Bangumi LLM confirmed '%s' (+%.2f boost): %s",
+                record_id,
+                metadata.series or metadata.title,
+                boost,
+                verification.reason,
+            )
         if best is None or metadata.confidence > best.confidence:
             best = metadata
         if metadata.confidence >= cfg.metadata.bangumi_min_confidence:
@@ -468,6 +525,31 @@ def _search_bangumi_metadata(
             cfg.metadata.bangumi_min_confidence,
         )
     return None
+
+
+def _verify_candidate(
+    record_id: int,
+    provider_name: str,
+    filename: str,
+    llm_metadata: LlmMetadata | None,
+    metadata: object,
+    cfg: PipelineConfig,
+) -> ScrapeVerification | None:
+    """Call LLM to verify a scraped metadata candidate matches the source file.
+
+    Uses duck-typing on metadata so it works with both BookwalkerMetadata
+    and BangumiMetadata without an explicit isinstance check.
+    """
+    return verify_scrape_with_llm(
+        filename=filename,
+        llm_parse=llm_metadata,
+        provider=provider_name,
+        scraped_title=str(getattr(metadata, "title", "") or ""),
+        scraped_series=str(getattr(metadata, "series", "") or ""),
+        scraped_volume=str(getattr(metadata, "volume", "") or ""),
+        scraped_author=str(getattr(metadata, "author_text", "") or ""),
+        cfg=cfg.metadata,
+    )
 
 
 def _collect_metadata_candidates(

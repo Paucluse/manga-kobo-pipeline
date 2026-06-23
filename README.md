@@ -71,13 +71,44 @@ KOMGA_PORT=25600
 MANGA_PIPELINE_LOG_LEVEL=INFO
 ```
 
-如果要开启 LLM 文件名规范化，推荐使用 Google AI Studio / Gemini API。
+## LLM 功能说明
+
+管线提供两个独立的 LLM 功能，均使用同一个 OpenAI 兼容接口（推荐 Gemini Flash）。
+
+### 功能一：文件名归一化（`llm_normalize_enabled`）
+
+在正则解析文件名之后，LLM 会对文件名重新理解，输出：
+
+- `clean_title`：剔除扫描组、出版社、格式标记后的纯系列名
+- `titles.traditional_chinese`：台版繁体正式书名
+- `titles.japanese`：日文原名
+- `scraping_queries.bookwalker_tw`：专门用于 BookWalker 台湾的检索词列表
+- `scraping_queries.bookwalker_jp`：专门用于 BookWalker 日本的检索词列表
+- `scraping_queries.bangumi`：专门用于 Bangumi 的检索词列表
+- `parse_status`：`ok / ambiguous / insufficient`，影响置信度判断
+- `warnings`：解析风险提示
+
+这些结果会直接喂给下游刮削器作为搜索词，替代纯正则解析的结果。
+
+### 功能二：刮削结果 LLM 验证（`llm_verify_scrape_enabled`）
+
+在每个刮削平台（BookWalker TW / JP / Bangumi）返回结果之后，LLM 会额外判断：
+**刮削结果描述的是否与原始文件同一部作品？**
+
+- 如果 LLM 认为不匹配（如系列名换了、卷号差异过大），该候选会被拒绝，管线继续尝试下一个平台。
+- 如果 LLM 确认匹配，置信度会额外 +最多 0.15（按 LLM 的确定性比例）。
+
+此功能会额外消耗 API 调用次数（每本书最多 3 次），但可显著减少错误刮削。
+Gemini Flash Lite 免费层通常有充裕余量。
+
+### 配置 LLM
+
 先创建本地密钥文件：
 
 ```bash
 mkdir -p secrets
 chmod 700 secrets
-nano secrets/gemini_api_key
+echo "your_api_key_here" > secrets/gemini_api_key
 chmod 600 secrets/gemini_api_key
 ```
 
@@ -86,11 +117,16 @@ chmod 600 secrets/gemini_api_key
 
 ```yaml
 metadata:
+  # 功能一：文件名归一化（推荐开启）
   llm_normalize_enabled: true
+
+  # 功能二：刮削后验证（可选，会额外消耗 API 调用）
+  llm_verify_scrape_enabled: false
+
   llm_base_url: https://generativelanguage.googleapis.com/v1beta/openai
   llm_model: gemini-3.1-flash-lite
   llm_api_key_file: /run/secrets/gemini_api_key
-  llm_api_key_env: GEMINI_API_KEY
+  llm_api_key_env: GEMINI_API_KEY  # 备用环境变量，优先使用文件
 ```
 
 密钥文件会只读挂载进容器。不要把密钥写进仓库。

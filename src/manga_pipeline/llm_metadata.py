@@ -187,6 +187,132 @@ def normalize_with_llm(
 
 
 # ---------------------------------------------------------------------------
+# Post-scraping LLM verification
+# ---------------------------------------------------------------------------
+
+VERIFY_PROMPT = """\
+你是漫画元数据验证助手。
+你将收到：原始文件名、第一步 LLM 解析结果、以及某个刮削平台返回的元数据。
+你的任务：判断刮削结果描述的是否与原始文件同一部作品，并给出理由。
+
+规则：
+1. 只输出严格 JSON，不要 Markdown，不要解释文字。
+2. 以下情况判定 match=false：
+   - 刮削结果的系列名与文件名描述的作品明显不同（换了作品）。
+   - 卷号差异超过 1（如文件明确是第 3 卷，但刮削结果是第 7 卷）。
+3. 以下情况仍可判定 match=true：
+   - 繁体/简体/日文名称不同但指同一作品。
+   - 刮削结果缺少卷号（单行本或系列级匹配）。
+   - 作者名字因翻译差异略有不同。
+4. confidence 表示你对判断的把握程度（0.0~1.0）。
+
+输出格式：
+{
+  "match": true,
+  "confidence": 0.9,
+  "reason": "简短说明（中文，一句话）"
+}
+"""
+
+
+@dataclass
+class ScrapeVerification:
+    """Result of LLM verification of a scraped metadata result."""
+
+    match: bool = False
+    confidence: float = 0.0
+    reason: str = ""
+    elapsed_ms: int = 0
+
+
+def verify_scrape_with_llm(
+    filename: str,
+    llm_parse: LlmMetadata | None,
+    provider: str,
+    scraped_title: str,
+    scraped_series: str,
+    scraped_volume: str,
+    scraped_author: str,
+    cfg: MetadataConfig,
+) -> ScrapeVerification | None:
+    """Ask the LLM whether a scraped result matches the original file.
+
+    Args:
+        filename: The raw source filename (as fed to the pipeline).
+        llm_parse: The LlmMetadata from the filename-normalisation step,
+                   or None if normalisation was skipped/failed.
+        provider: Human-readable provider name for logging (e.g. 'BookWalker TW').
+        scraped_title: Title returned by the scraping provider.
+        scraped_series: Series name returned by the scraping provider.
+        scraped_volume: Volume string returned by the scraping provider.
+        scraped_author: Author string returned by the scraping provider.
+        cfg: MetadataConfig with LLM connection settings.
+
+    Returns:
+        ScrapeVerification on success, None if verification is disabled,
+        the LLM is unavailable, or an error occurs.
+    """
+    if not cfg.llm_verify_scrape_enabled or not cfg.llm_model:
+        return None
+
+    api_key = _read_api_key(cfg)
+    if not api_key:
+        return None
+
+    user_content = json.dumps(
+        {
+            "original_filename": filename,
+            "llm_parse_result": {
+                "title": llm_parse.title if llm_parse else "",
+                "title_tw": llm_parse.title_tw if llm_parse else "",
+                "title_jp": llm_parse.title_jp if llm_parse else "",
+                "author": llm_parse.author if llm_parse else "",
+                "volume": llm_parse.volume if llm_parse else "",
+            },
+            "scraped_result": {
+                "provider": provider,
+                "title": scraped_title,
+                "series": scraped_series,
+                "volume": scraped_volume,
+                "author": scraped_author,
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    payload: dict[str, object] = {
+        "model": cfg.llm_model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": VERIFY_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+
+    start = time.monotonic()
+    try:
+        response = _post_chat_completion(cfg, api_key, payload)
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+    except Exception as exc:
+        logger.warning("LLM scrape verification request failed (%s): %s", provider, exc)
+        return None
+
+    try:
+        data = json.loads(response.json()["choices"][0]["message"]["content"])
+    except (KeyError, json.JSONDecodeError) as exc:
+        logger.warning("LLM scrape verification unparseable response (%s): %s", provider, exc)
+        return None
+
+    return ScrapeVerification(
+        match=bool(data.get("match", True)),   # default True: don't block on bad response
+        confidence=float(data.get("confidence") or 0.0),
+        reason=str(data.get("reason") or ""),
+        elapsed_ms=elapsed_ms,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

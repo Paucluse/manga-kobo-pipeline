@@ -67,6 +67,7 @@ class MetadataConfig(BaseModel):
     bangumi_max_candidates: int = 30
     download_bookwalker_covers: bool = True
     llm_normalize_enabled: bool = False
+    llm_verify_scrape_enabled: bool = False  # extra LLM call to validate scrape results
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = ""
     llm_api_key_file: Path | None = None
