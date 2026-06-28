@@ -39,6 +39,10 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------------------------
+# Request / Response models
+# ---------------------------------------------------------------------------
+
 class SetupRequest(BaseModel):
     username: str
     password: str
@@ -75,6 +79,38 @@ class RescrapeRequest(BaseModel):
     include_unfinished: bool = False
 
 
+class MetadataPatchRequest(BaseModel):
+    """Fields that can be overridden manually."""
+    title: str | None = None
+    series: str | None = None
+    author: str | None = None
+    publisher: str | None = None
+    volume: str | None = None
+    summary: str | None = None
+    cover_url: str | None = None
+    isbn: str | None = None
+
+
+class SingleRescrapeRequest(BaseModel):
+    """Trigger a rescrape for a single record with an explicit search term."""
+    provider: str = "bookwalker_tw"
+    title: str = ""
+    dry_run: bool = False
+    relocate: bool = True
+
+
+class SearchRequest(BaseModel):
+    """Freeform provider search not tied to a record."""
+    provider: str
+    title: str
+    volume: str = ""
+    author: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Dependency helpers
+# ---------------------------------------------------------------------------
+
 def get_cfg() -> PipelineConfig:
     return load_config()
 
@@ -100,6 +136,10 @@ def require_user(
         raise HTTPException(status_code=401, detail="登录已过期")
     return user
 
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/api/setup/status")
 def setup_status(store: ControlStore = Depends(get_store)) -> dict[str, Any]:
@@ -152,6 +192,10 @@ def me(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
     return user
 
 
+# ---------------------------------------------------------------------------
+# Dashboard / status
+# ---------------------------------------------------------------------------
+
 @app.get("/api/status")
 def status(
     _user: dict[str, Any] = Depends(require_user),
@@ -173,6 +217,10 @@ def status(
     finally:
         db.close()
 
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
 
 @app.get("/api/settings")
 def get_settings(
@@ -213,6 +261,223 @@ def set_prompt(
     return {"id": prompt_id, "prompt": store.get_active_prompt()}
 
 
+# ---------------------------------------------------------------------------
+# Records — list & detail
+# ---------------------------------------------------------------------------
+
+@app.get("/api/records")
+def list_records(
+    status_filter: str = "",
+    search: str = "",
+    page: int = 1,
+    size: int = 50,
+    _user: dict[str, Any] = Depends(require_user),
+    cfg: PipelineConfig = Depends(get_cfg),
+) -> dict[str, Any]:
+    """Paginated, filterable record listing."""
+    db_path = cfg.paths.state / "pipeline.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if status_filter:
+            conditions.append("current_status = ?")
+            params.append(status_filter)
+        if search:
+            like = f"%{search}%"
+            conditions.append(
+                "(file_name LIKE ? OR series LIKE ? OR title LIKE ? OR collection_title LIKE ?)"
+            )
+            params.extend([like, like, like, like])
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM manga_records {where}", params
+        ).fetchone()[0]
+
+        offset = (page - 1) * size
+        rows = conn.execute(
+            f"""
+            SELECT id, file_name, current_status, title, series, volume, author,
+                   publisher, collection_title, cover_url, source_url, confidence,
+                   error_message, created_at, updated_at
+            FROM manga_records {where}
+            ORDER BY updated_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [size, offset],
+        ).fetchall()
+        return {
+            "total": total,
+            "page": page,
+            "size": size,
+            "items": [dict(row) for row in rows],
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/records/{record_id}")
+def get_record(
+    record_id: int,
+    _user: dict[str, Any] = Depends(require_user),
+    cfg: PipelineConfig = Depends(get_cfg),
+) -> dict[str, Any]:
+    """Fetch a single record with all fields."""
+    db = Database(cfg.paths.state / "pipeline.db")
+    try:
+        record = db.get_record_by_id(record_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+        return record.__dict__
+    finally:
+        db.close()
+
+
+@app.patch("/api/records/{record_id}/metadata")
+def patch_metadata(
+    record_id: int,
+    request: MetadataPatchRequest,
+    _user: dict[str, Any] = Depends(require_user),
+    cfg: PipelineConfig = Depends(get_cfg),
+) -> dict[str, Any]:
+    """Manually override metadata fields for a record."""
+    from datetime import datetime
+
+    updates = {k: v for k, v in request.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="没有提供任何字段")
+
+    db_path = cfg.paths.state / "pipeline.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT id FROM manga_records WHERE id = ?", (record_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+        set_clauses = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [datetime.now().isoformat(), record_id]
+        conn.execute(
+            f"UPDATE manga_records SET {set_clauses}, updated_at = ? WHERE id = ?",
+            values,
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM manga_records WHERE id = ?", (record_id,)).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+
+@app.post("/api/records/{record_id}/rescrape")
+def single_rescrape(
+    record_id: int,
+    request: SingleRescrapeRequest,
+    _user: dict[str, Any] = Depends(require_user),
+    cfg: PipelineConfig = Depends(get_cfg),
+) -> dict[str, Any]:
+    """Re-scrape a single record, optionally with a custom search title."""
+    db = Database(cfg.paths.state / "pipeline.db")
+    try:
+        record = db.get_record_by_id(record_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+        # Override the record's title for search if provided
+        if request.title:
+            from manga_pipeline.models import MangaRecord
+            from dataclasses import replace
+            record = replace(record, series=request.title, title=request.title)
+        results = rescrape_records(
+            [record],
+            cfg,
+            db,
+            dry_run=request.dry_run,
+            relocate=request.relocate,
+            trigger_scan=not request.dry_run,
+        )
+        return {"result": results[0].__dict__ if results else {}}
+    finally:
+        db.close()
+
+
+@app.post("/api/records/{record_id}/reimport")
+def reimport_record(
+    record_id: int,
+    _user: dict[str, Any] = Depends(require_user),
+    cfg: PipelineConfig = Depends(get_cfg),
+) -> dict[str, Any]:
+    """Reset record to METADATA_PARSED so the pipeline re-runs convert+import steps."""
+    db = Database(cfg.paths.state / "pipeline.db")
+    try:
+        record = db.get_record_by_id(record_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+        # Only reset if the record is in a terminal or failed state
+        allowed_statuses = {
+            ProcessingStatus.DONE,
+            ProcessingStatus.FAILED,
+            ProcessingStatus.NEEDS_REVIEW,
+            ProcessingStatus.METADATA_PARSED,
+            ProcessingStatus.IMPORTED,
+        }
+        if record.current_status not in allowed_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"记录当前状态 {record.current_status} 不支持重新入库",
+            )
+        db.update_status(record_id, ProcessingStatus.METADATA_PARSED, error_message="")
+        return {"ok": True, "status": ProcessingStatus.METADATA_PARSED}
+    finally:
+        db.close()
+
+
+@app.post("/api/records/{record_id}/reset")
+def reset_record(
+    record_id: int,
+    _user: dict[str, Any] = Depends(require_user),
+    cfg: PipelineConfig = Depends(get_cfg),
+) -> dict[str, Any]:
+    """Reset a failed/stuck record back to DISCOVERED so the pipeline retries from scratch."""
+    db = Database(cfg.paths.state / "pipeline.db")
+    try:
+        record = db.get_record_by_id(record_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+        db.update_status(record_id, ProcessingStatus.DISCOVERED, error_message="")
+        return {"ok": True, "status": ProcessingStatus.DISCOVERED}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Provider search (standalone, not tied to a record)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/search")
+def search_provider(
+    request: SearchRequest,
+    _user: dict[str, Any] = Depends(require_user),
+    cfg: PipelineConfig = Depends(get_cfg),
+) -> dict[str, Any]:
+    """Search a metadata provider with arbitrary terms and return candidates."""
+    metadata = _search_provider(
+        request.provider,
+        request.title,
+        request.volume,
+        request.author,
+        cfg,
+    )
+    if metadata is None:
+        return {"candidate": None}
+    candidate = candidate_from_metadata(request.provider, metadata)
+    return {"candidate": candidate.__dict__}
+
+
+# ---------------------------------------------------------------------------
+# LLM runs
+# ---------------------------------------------------------------------------
+
 @app.get("/api/llm-runs")
 def llm_runs(
     limit: int = 50,
@@ -221,6 +486,10 @@ def llm_runs(
 ) -> dict[str, Any]:
     return {"items": store.list_llm_runs(limit=limit)}
 
+
+# ---------------------------------------------------------------------------
+# Approvals
+# ---------------------------------------------------------------------------
 
 @app.get("/api/approvals")
 def approvals(
@@ -325,6 +594,10 @@ def approve(
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Batch rescrape (existing)
+# ---------------------------------------------------------------------------
+
 @app.post("/api/rescrape")
 def rescrape(
     request: RescrapeRequest,
@@ -352,6 +625,10 @@ def rescrape(
     finally:
         db.close()
 
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _search_provider(
     provider: str,
@@ -390,8 +667,8 @@ def _query_records(db_path: Path, limit: int) -> list[dict[str, Any]]:
     try:
         rows = conn.execute(
             """
-            SELECT id, file_name, current_status, title, series, volume,
-                   collection_title, source_url, updated_at
+            SELECT id, file_name, current_status, title, series, volume, author,
+                   collection_title, cover_url, source_url, confidence, updated_at
             FROM manga_records
             ORDER BY updated_at DESC
             LIMIT ?
