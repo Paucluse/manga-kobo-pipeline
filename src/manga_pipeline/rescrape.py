@@ -193,6 +193,152 @@ def rescrape_record(
     return result
 
 
+def force_rescrape_record(
+    record: MangaRecord,
+    cfg: PipelineConfig,
+    db: Database,
+    *,
+    provider: str,
+    search_title: str,
+    volume: str = "",
+    author: str = "",
+    dry_run: bool = False,
+    relocate: bool = True,
+) -> RescrapeResult:
+    """Force-apply metadata from the given provider+title, bypassing ALL automatic
+    filters (LLM normalization, confidence threshold, context-matching).
+
+    This is the "manual override" path invoked from the web console. The user's
+    explicit choice is treated as authoritative — no LLM or scoring can veto it.
+    """
+    record_id = record.id
+    assert record_id is not None
+
+    # Direct provider call — one shot, no retry loops, no filters
+    try:
+        if provider == "bookwalker_tw":
+            metadata = search_bookwalker_tw(
+                search_title,
+                volume=volume or record.volume,
+                author=author or record.author,
+                max_candidates=cfg.metadata.bookwalker_tw_max_candidates,
+            )
+        elif provider == "bookwalker_jp":
+            metadata = search_bookwalker_jp(
+                search_title,
+                volume=volume or record.volume,
+                author=author or record.author,
+                max_candidates=cfg.metadata.bookwalker_jp_max_candidates,
+            )
+        elif provider == "bangumi":
+            metadata = search_bangumi(
+                search_title,
+                volume=volume or record.volume,
+                author=author or record.author,
+                max_candidates=cfg.metadata.bangumi_max_candidates,
+            )
+        else:
+            return RescrapeResult(
+                record_id=record_id,
+                file_name=record.file_name,
+                status="error",
+                message=f"Unknown provider: {provider}",
+                old_title=record.title,
+                old_series=record.series,
+                old_volume=record.volume,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[ID:%s] Force-rescrape provider call failed", record_id)
+        return RescrapeResult(
+            record_id=record_id,
+            file_name=record.file_name,
+            status="error",
+            message=str(e),
+            old_title=record.title,
+            old_series=record.series,
+            old_volume=record.volume,
+        )
+
+    if metadata is None:
+        return RescrapeResult(
+            record_id=record_id,
+            file_name=record.file_name,
+            status="no_match",
+            message=f"Provider '{provider}' returned no results for: {search_title}",
+            old_title=record.title,
+            old_series=record.series,
+            old_volume=record.volume,
+        )
+
+    # Build updated record — user override: keep original volume if provider returns none
+    updated = _record_with_metadata(record, metadata)
+    if not updated.volume and record.volume:
+        updated = replace(updated, volume=record.volume)
+
+    result = RescrapeResult(
+        record_id=record_id,
+        file_name=record.file_name,
+        status="updated",
+        old_title=record.title,
+        new_title=updated.title,
+        old_series=record.series,
+        new_series=updated.series,
+        old_volume=record.volume,
+        new_volume=updated.volume,
+        confidence=metadata.confidence,
+    )
+
+    if dry_run:
+        result.status = "would_update"
+        return result
+
+    # Write ComicInfo.xml + EPUB OPF metadata (no confidence gate here)
+    archive_path = _find_archive_cbz(record, cfg)
+    if archive_path and relocate:
+        try:
+            archive_path = _relocate_archive_cbz(archive_path, updated, cfg)
+        except FileExistsError as exc:
+            logger.warning("[ID:%s] Archive relocation skipped: %s", record_id, exc)
+        updated = replace(updated, archive_path=str(archive_path))
+
+    epub_path = _find_imported_epub(record, cfg)
+    if epub_path and relocate:
+        try:
+            epub_path = _relocate_imported_epub(epub_path, updated, cfg)
+        except FileExistsError as exc:
+            logger.warning("[ID:%s] EPUB relocation skipped: %s", record_id, exc)
+        updated = replace(updated, converted_path=str(epub_path))
+
+    _rewrite_record_files(updated, cfg, epub_path)
+
+    db.update_status(
+        record_id,
+        record.current_status,
+        title=updated.title,
+        author=updated.author,
+        series=updated.series,
+        volume=updated.volume,
+        publisher=updated.publisher,
+        summary=updated.summary,
+        cover_url=updated.cover_url,
+        source_url=updated.source_url,
+        isbn=updated.isbn,
+        page_count=updated.page_count,
+        confidence=str(updated.confidence),
+        archive_path=str(archive_path) if archive_path else record.archive_path,
+        converted_path=str(epub_path) if epub_path else record.converted_path,
+        library_book_id=_build_series_name(updated) or record.library_book_id,
+    )
+
+    # Always trigger Komga scan after a forced update
+    try:
+        _trigger_komga_scan(cfg)
+    except Exception:  # noqa: BLE001
+        logger.warning("[ID:%s] Komga scan trigger failed after force-rescrape", record_id)
+
+    return result
+
+
 def _lookup_metadata(
     record: MangaRecord,
     cfg: PipelineConfig,

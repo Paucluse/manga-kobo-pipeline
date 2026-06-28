@@ -25,7 +25,7 @@ from manga_pipeline.database import Database
 from manga_pipeline.filename_parser import ParseResult
 from manga_pipeline.models import ProcessingStatus
 from manga_pipeline.pipeline import _apply_review_candidate, _candidate_record_fields
-from manga_pipeline.rescrape import rescrape_records, select_records
+from manga_pipeline.rescrape import force_rescrape_record, rescrape_records, select_records
 
 SESSION_COOKIE = "pipeline_session"
 
@@ -95,8 +95,13 @@ class SingleRescrapeRequest(BaseModel):
     """Trigger a rescrape for a single record with an explicit search term."""
     provider: str = "bookwalker_tw"
     title: str = ""
+    volume: str = ""
+    author: str = ""
     dry_run: bool = False
     relocate: bool = True
+    force: bool = False
+    """When True, bypass LLM normalization, confidence thresholds, and context
+    matching filters. The user's explicit provider+title selection is final."""
 
 
 class SearchRequest(BaseModel):
@@ -377,17 +382,37 @@ def single_rescrape(
     _user: dict[str, Any] = Depends(require_user),
     cfg: PipelineConfig = Depends(get_cfg),
 ) -> dict[str, Any]:
-    """Re-scrape a single record, optionally with a custom search title."""
+    """Re-scrape a single record with an optional custom search title.
+
+    When ``force=True`` the request bypasses all automatic filters (LLM
+    normalization, confidence thresholds, context-matching). The user's
+    explicit provider + title choice is treated as authoritative.
+    """
     db = Database(cfg.paths.state / "pipeline.db")
     try:
         record = db.get_record_by_id(record_id)
         if record is None:
             raise HTTPException(status_code=404, detail="记录不存在")
-        # Override the record's title for search if provided
+
+        if request.force:
+            # ── Manual override path: no LLM, no threshold, no context check ──
+            result = force_rescrape_record(
+                record,
+                cfg,
+                db,
+                provider=request.provider,
+                search_title=request.title or record.series or record.title or record.file_name,
+                volume=request.volume,
+                author=request.author,
+                dry_run=request.dry_run,
+                relocate=request.relocate,
+            )
+            return {"result": result.__dict__}
+
+        # ── Automatic path: LLM normalization + confidence gates apply ──
         if request.title:
-            from manga_pipeline.models import MangaRecord
-            from dataclasses import replace
-            record = replace(record, series=request.title, title=request.title)
+            from dataclasses import replace as _replace
+            record = _replace(record, series=request.title, title=request.title)
         results = rescrape_records(
             [record],
             cfg,

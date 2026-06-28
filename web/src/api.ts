@@ -91,15 +91,18 @@ export const patchMetadata = (id: number, patch: MetadataPatch) =>
   });
 export const rescrapeRecord = (
   id: number,
-  opts: { provider?: string; title?: string; dry_run?: boolean; relocate?: boolean }
+  opts: { provider?: string; title?: string; volume?: string; author?: string; dry_run?: boolean; relocate?: boolean; force?: boolean }
 ) =>
   request<{ result: RescrapeResult }>(`/api/records/${id}/rescrape`, {
     method: "POST",
     body: JSON.stringify({
       provider: opts.provider ?? "bookwalker_tw",
       title: opts.title ?? "",
+      volume: opts.volume ?? "",
+      author: opts.author ?? "",
       dry_run: opts.dry_run ?? false,
       relocate: opts.relocate ?? true,
+      force: opts.force ?? true,
     }),
   });
 export const reimportRecord = (id: number) =>

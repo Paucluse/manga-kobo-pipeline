@@ -114,8 +114,11 @@ export function RecordDetail({ recordId, onBack }: RecordDetailProps) {
       const res = await api.rescrapeRecord(record.id, {
         provider,
         title: candidate.series || candidate.title || searchTitle,
+        volume: candidate.volume || searchVolume || "",
+        author: candidate.author || searchAuthor || "",
         dry_run: false,
         relocate: true,
+        force: true,   // ← 人工选定，绕过 LLM 和置信度门槛
       });
       setRescrapeResult(res.result);
       showToast(`重刮削完成：${res.result.new_series || res.result.new_title || "已更新"}`, "success");
