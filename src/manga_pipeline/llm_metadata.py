@@ -78,6 +78,49 @@ BookWalker 台湾、BookWalker 日本、Bangumi 刮削的关键词。
 }
 """
 
+COLLECTION_PROMPT = """\
+你是漫画系列归一化助手。你将收到一个 inbox 父目录名，以及该目录下的文件名列表。
+你的任务是判断这一整个目录代表的漫画系列，并输出后续所有卷都必须继承的系列锚点。
+
+规则：
+1. 只输出严格 JSON，不要 Markdown 代码块，不要解释文字。
+2. 以父目录名为主要依据，文件名列表只用于判断卷号范围、版本信息和噪音词。
+3. 不要因为单卷文件名、卷号、扫描组、出版社、画质标记而改变系列名。
+4. 如果作品有多语言别名，必须尽量给出繁体中文正式名、日文原名、英文/罗马字别名。
+5. scraping_queries 要足够丰富，用于 BookWalker 台湾、BookWalker 日本、Bangumi 搜索。
+6. clean_title 建议使用最终进入 Komga 的系列名；中文书库优先使用繁体中文常用正式名。
+7. 不确定的信息填 null 或空数组 []，不要编造作者、出版社。
+
+输出 JSON 格式（字段含义见注释，实际输出不要包含注释）：
+{
+  "raw_filename": "<父目录名>",
+  "parse_status": "<ok | ambiguous | insufficient>",
+  "clean_title": "<最终 Komga 系列名，优先繁体中文正式名>",
+  "volume_number": null,
+  "volume_text": null,
+  "edition_hints": ["<整套版本信息，如 完全版、文库版>"],
+  "publisher_hints": ["<出版社提示>"],
+  "noise_removed": ["<目录和文件名中应剔除的噪音片段>"],
+  "titles": {
+    "traditional_chinese": "<繁体中文正式书名或常用译名>",
+    "simplified_chinese": "<简体中文书名>",
+    "japanese": "<日文原名>",
+    "romaji": "<罗马字或英文名>",
+    "aliases": ["<其他别名、简称、英文名、常见译名>"]
+  },
+  "authors": ["<作者名>"],
+  "scraping_queries": {
+    "bookwalker_tw": ["<繁中/台版搜索词，按优先级>"],
+    "bookwalker_jp": ["<日文搜索词，按优先级>"],
+    "bangumi": ["<Bangumi 搜索词，日文和中文都可，按优先级>"]
+  },
+  "verified": false,
+  "verification_level": "filename_only",
+  "confidence": 0.0,
+  "warnings": ["<系列级歧义说明>"]
+}
+"""
+
 
 @dataclass
 class LlmMetadata:
@@ -123,7 +166,8 @@ def normalize_with_llm(
 
     Args:
         filename: Raw filename (or collection + filename) to analyse.
-        parsed: Current regex-parsed result, passed to LLM as a hint.
+        parsed: Optional parser hint. The normal pipeline passes an empty
+                result so the LLM sees only the raw filename.
         cfg: MetadataConfig containing LLM connection settings.
         prompt_template: Optional override prompt (from Web UI emergency control).
                          When empty the fixed SYSTEM_PROMPT constant is used.
@@ -147,21 +191,65 @@ def normalize_with_llm(
     # otherwise fall back to the canonical fixed prompt.
     system_prompt = prompt_template.strip() or SYSTEM_PROMPT
 
-    # User message: raw filename + current regex parse as a hint.
+    # User message: raw filename only. Do not provide a local regex parse in
+    # the normal path because non-standard inbox names make those hints harmful.
     # We do NOT repeat the schema here — it lives in the system prompt only.
     user_content = json.dumps(
-        {
-            "filename": filename,
-            "regex_parse_hint": {
-                "title": parsed.title,
-                "author": parsed.author,
-                "publisher": parsed.publisher,
-                "volume": parsed.volume,
-            },
-        },
+        {"filename": filename},
         ensure_ascii=False,
     )
 
+    payload: dict[str, object] = {
+        "model": cfg.llm_model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+
+    start = time.monotonic()
+    response = _post_chat_completion(cfg, api_key, payload)
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+
+    resp_json = response.json()
+    content = resp_json["choices"][0]["message"]["content"]
+    metadata = _parse_llm_json(content)
+    if metadata is not None:
+        metadata.raw_content = content
+        metadata.prompt = system_prompt
+        metadata.elapsed_ms = elapsed_ms
+    return metadata
+
+
+def normalize_collection_with_llm(
+    collection_title: str,
+    filenames: list[str],
+    cfg: MetadataConfig,
+    prompt_template: str = "",
+) -> LlmMetadata | None:
+    """Normalize an inbox collection folder into a reusable series anchor."""
+    if not cfg.llm_normalize_enabled or not cfg.llm_model:
+        return None
+
+    api_key = _read_api_key(cfg)
+    if not api_key:
+        logger.warning(
+            "LLM collection normalization enabled but no API key is available from %s or %s",
+            cfg.llm_api_key_file,
+            cfg.llm_api_key_env,
+        )
+        return None
+
+    system_prompt = prompt_template.strip() or COLLECTION_PROMPT
+    user_content = json.dumps(
+        {
+            "collection_title": collection_title,
+            "filenames": filenames,
+        },
+        ensure_ascii=False,
+    )
     payload: dict[str, object] = {
         "model": cfg.llm_model,
         "temperature": 0,
@@ -333,11 +421,48 @@ def _post_chat_completion(
     api_key: str,
     payload: dict[str, object],
 ) -> requests.Response:
-    """POST to an OpenAI-compatible endpoint with a JSON-mode fallback.
+    """POST to an OpenAI-compatible endpoint with retries and JSON fallback.
 
     Some providers (e.g. older Gemini endpoints) return HTTP 400 when
     response_format is present; in that case we retry without it.
     """
+    max_attempts = max(1, int(cfg.llm_max_retries))
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _post_chat_completion_once(cfg, api_key, payload)
+        except requests.HTTPError as exc:
+            response = exc.response
+            status_code = response.status_code if response is not None else 0
+            if status_code not in {408, 429, 500, 502, 503, 504}:
+                raise
+            last_error = exc
+        except requests.RequestException as exc:
+            last_error = exc
+
+        if attempt >= max_attempts:
+            break
+        delay = max(0.0, float(cfg.llm_retry_backoff_seconds)) * attempt
+        logger.warning(
+            "LLM request failed on attempt %d/%d, retrying in %.1fs: %s",
+            attempt,
+            max_attempts,
+            delay,
+            last_error,
+        )
+        if delay:
+            time.sleep(delay)
+
+    assert last_error is not None
+    raise last_error
+
+
+def _post_chat_completion_once(
+    cfg: MetadataConfig,
+    api_key: str,
+    payload: dict[str, object],
+) -> requests.Response:
+    """Send one LLM request, with a one-shot fallback for JSON mode."""
     url = f"{cfg.llm_base_url.rstrip('/')}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -391,8 +516,8 @@ def _parse_llm_json(content: str) -> LlmMetadata | None:
     )
     volume = _first_text(
         data.get("volume"),
-        data.get("volume_text"),
         data.get("volume_number"),
+        data.get("volume_text"),
     )
 
     # --- per-provider search terms ---

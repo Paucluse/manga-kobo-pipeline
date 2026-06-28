@@ -62,6 +62,29 @@ class MangaRecord:
     )
 
 
+@dataclass
+class SeriesAnchor:
+    """Canonical series metadata for one inbox collection folder."""
+
+    collection_title: str = ""
+    canonical_series: str = ""
+    title_tw: str = ""
+    title_jp: str = ""
+    author: str = ""
+    publisher: str = ""
+    queries_tw: list[str] = field(default_factory=list)
+    queries_jp: list[str] = field(default_factory=list)
+    queries_bangumi: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
+    source_url: str = ""
+    created_at: str = field(
+        default_factory=lambda: datetime.now().isoformat()
+    )
+    updated_at: str = field(
+        default_factory=lambda: datetime.now().isoformat()
+    )
+
+
 # Supported manga file extensions
 SUPPORTED_EXTENSIONS: set[str] = {
     ".zip", ".cbz",

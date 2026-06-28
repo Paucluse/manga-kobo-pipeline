@@ -74,6 +74,7 @@ services:
       - ${DATA_ROOT:-/srv/ebooks}/komga-library:/data
     ports:
       - "${KOMGA_PORT:-25600}:25600"
+      - "25601:25601"
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       - TZ=Asia/Shanghai

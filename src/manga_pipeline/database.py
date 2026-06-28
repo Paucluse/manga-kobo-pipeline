@@ -6,12 +6,13 @@ Uses file_hash for idempotency — same file won't be re-imported.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import suppress
 from pathlib import Path
 
 from manga_pipeline.logging_config import get_logger
-from manga_pipeline.models import MangaRecord, ProcessingStatus
+from manga_pipeline.models import MangaRecord, ProcessingStatus, SeriesAnchor
 
 logger = get_logger(__name__)
 
@@ -44,6 +45,24 @@ CREATE TABLE IF NOT EXISTS manga_records (
 )
 """
 
+CREATE_SERIES_ANCHORS_SQL = """
+CREATE TABLE IF NOT EXISTS series_anchors (
+    collection_title TEXT PRIMARY KEY,
+    canonical_series TEXT NOT NULL,
+    title_tw TEXT DEFAULT '',
+    title_jp TEXT DEFAULT '',
+    author TEXT DEFAULT '',
+    publisher TEXT DEFAULT '',
+    queries_tw TEXT DEFAULT '[]',
+    queries_jp TEXT DEFAULT '[]',
+    queries_bangumi TEXT DEFAULT '[]',
+    aliases TEXT DEFAULT '[]',
+    source_url TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
 
 class Database:
     """SQLite database wrapper for manga processing state."""
@@ -64,6 +83,7 @@ class Database:
     def _create_tables(self) -> None:
         """Create tables if they don't exist."""
         self.conn.execute(CREATE_TABLE_SQL)
+        self.conn.execute(CREATE_SERIES_ANCHORS_SQL)
         # Migrate schema if needed
         for migration in [
             "ALTER TABLE manga_records ADD COLUMN publisher TEXT DEFAULT ''",
@@ -210,6 +230,58 @@ class Database:
         ).fetchall()
         return [self._row_to_record(row) for row in rows]
 
+    def get_series_anchor(self, collection_title: str) -> SeriesAnchor | None:
+        """Get the canonical series anchor for an inbox collection folder."""
+        row = self.conn.execute(
+            "SELECT * FROM series_anchors WHERE collection_title = ?",
+            (collection_title,),
+        ).fetchone()
+        return self._row_to_series_anchor(row) if row else None
+
+    def upsert_series_anchor(self, anchor: SeriesAnchor) -> None:
+        """Create or update a series anchor."""
+        from datetime import datetime
+
+        updated_at = datetime.now().isoformat()
+        created_at = anchor.created_at or updated_at
+        self.conn.execute(
+            """
+            INSERT INTO series_anchors (
+                collection_title, canonical_series, title_tw, title_jp,
+                author, publisher, queries_tw, queries_jp, queries_bangumi,
+                aliases, source_url, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(collection_title) DO UPDATE SET
+                canonical_series = excluded.canonical_series,
+                title_tw = excluded.title_tw,
+                title_jp = excluded.title_jp,
+                author = excluded.author,
+                publisher = excluded.publisher,
+                queries_tw = excluded.queries_tw,
+                queries_jp = excluded.queries_jp,
+                queries_bangumi = excluded.queries_bangumi,
+                aliases = excluded.aliases,
+                source_url = excluded.source_url,
+                updated_at = excluded.updated_at
+            """,
+            (
+                anchor.collection_title,
+                anchor.canonical_series,
+                anchor.title_tw,
+                anchor.title_jp,
+                anchor.author,
+                anchor.publisher,
+                json.dumps(anchor.queries_tw, ensure_ascii=False),
+                json.dumps(anchor.queries_jp, ensure_ascii=False),
+                json.dumps(anchor.queries_bangumi, ensure_ascii=False),
+                json.dumps(anchor.aliases, ensure_ascii=False),
+                anchor.source_url,
+                created_at,
+                updated_at,
+            ),
+        )
+        self.conn.commit()
+
     def increment_retry(self, record_id: int) -> None:
         """Increment the retry count for a record."""
         from datetime import datetime
@@ -250,3 +322,34 @@ class Database:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
+
+    @staticmethod
+    def _row_to_series_anchor(row: sqlite3.Row) -> SeriesAnchor:
+        """Convert a database row to a SeriesAnchor."""
+        return SeriesAnchor(
+            collection_title=row["collection_title"],
+            canonical_series=row["canonical_series"],
+            title_tw=row["title_tw"],
+            title_jp=row["title_jp"],
+            author=row["author"],
+            publisher=row["publisher"],
+            queries_tw=_json_list(row["queries_tw"]),
+            queries_jp=_json_list(row["queries_jp"]),
+            queries_bangumi=_json_list(row["queries_bangumi"]),
+            aliases=_json_list(row["aliases"]),
+            source_url=row["source_url"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+def _json_list(value: object) -> list[str]:
+    if not value:
+        return []
+    try:
+        data = json.loads(str(value))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item).strip() for item in data if str(item).strip()]

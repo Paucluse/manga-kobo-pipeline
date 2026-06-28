@@ -4,26 +4,30 @@
 
 把 ZIP / CBZ / RAR / CBR / 7Z 漫画放入 `inbox` 后，管线会自动完成：
 
-1. 解析文件名，识别系列、卷号、作者。
-2. 可选用 LLM 对文件名结果做前置规范化，并生成台版/日版检索标题候选。
+1. 提取原始文件名；合集目录会先把父目录名和目录内文件名列表交给 LLM，生成整套书共用的系列锚点。
+2. 使用 LLM 对单本文件名做前置规范化，并生成台版/日版/Bangumi 检索标题候选。
 3. 使用 BookWalker 台湾检索繁体中文元数据、封面、作者、出版社、ISBN、简介。
    BookWalker 台湾无可接受匹配时尝试 BookWalker 日本；两者都失败时使用 Bangumi 兜底。
-4. 归一化为 CBZ，并写入 `ComicInfo.xml`。
-5. 使用 KCC 转换为 Kobo 适用的 `*.kepub.epub`。
-6. 写入 EPUB/KEPUB 内置 OPF 元数据。
-7. 导入 Komga 书库目录并触发 Komga 扫描。
+4. 开启刮削验证时，由 LLM 判断候选是否确实是同一部作品；确认后才接受候选。
+5. 归一化为 CBZ，并写入 `ComicInfo.xml`。
+6. 使用 KCC 转换为 Kobo 适用的 `*.kepub.epub`。
+7. 写入 EPUB/KEPUB 内置 OPF 元数据。
+8. 导入 Komga 书库目录并触发 Komga 扫描。
 
 项目不依赖 Komf。元数据来源链路为 BookWalker 台湾 -> BookWalker 日本 -> Bangumi。
 
 ## 元数据规则
 
-- **系列名称**：优先使用达标元数据源返回的正式系列名，例如 `蒼藍鋼鐵戰艦` 或日版正式名。合集目录名只作为检索和无命中时的兜底解析来源。
+- **合集系列锚点**：当文件来自 `inbox` 下的合集目录时，管线会先把父目录名和最多 80 个子文件名交给 LLM，生成 `series_anchors` 记录。后续同目录所有卷都会继承这个锚点，避免同一套书因为中日文别名、Bangumi/BookWalker 返回差异而拆成多个 Komga 系列。
+- **系列名称**：合集目录优先使用系列锚点，例如 `五星物語`；刮削结果只补充作者、出版社、简介、封面、ISBN 和来源 URL，不再覆盖锚点系列名。单本散放文件则使用 LLM 文件名解析和刮削结果确定系列名。
 - **系列封面**：使用外部元数据封面生成 Komga 本地 `cover.jpg`。如果先导入的不是第 1 卷，后续第 1 卷进入时会覆盖系列封面；非第 1 卷不会覆盖已有系列封面。
 - **系列简介**：不强制写入。Komga 中系列介绍可以为空，避免把某一卷简介误当成系列简介。
 - **单本封面**：每本书使用外部元数据封面，写成 Komga 可识别的同名 `.jpg` sidecar。
 - **单本信息**：每本书的标题、卷号、作者、出版社、简介、ISBN、来源 URL 等以第一个达标来源为准：BookWalker 台湾优先，其次 BookWalker 日本，最后 Bangumi。
+- **卷号**：卷号以源文件名/单本 LLM 解析为准。外部平台返回的卷号不会覆盖源文件卷号，避免整套书刮到同一个平台条目时全部变成第 1 卷。
 - **命名**：导入 Komga 的文件名使用 `系列名 v001.kepub.epub` 这种稳定排序格式；显示标题写入元数据为 `系列名 卷1`。
 - **检索候选**：BookWalker 台湾查询前会把中文标题转换为台繁；LLM 开启时会额外提供台版/日版正式名和查询别名，例如 `DNA` -> `D・N・A2`。
+- **同卷替换**：如果已入库同系列同卷，再放入更大的源文件，管线会把旧 CBZ/KEPUB/封面 sidecar 移到 `processing/replacement-backups` 后重新生成并导入。新源文件不大于旧归档时会拒绝替换，避免低质量文件覆盖高质量版本。
 
 ## 目录约定
 
@@ -71,13 +75,25 @@ KOMGA_PORT=25600
 MANGA_PIPELINE_LOG_LEVEL=INFO
 ```
 
+Compose 同时暴露 Komga 的 Kobo Sync 端口 `25601`。如果 Kobo 阅读器需要同步，请确认设备访问的是宿主机的 `25601` 端口，并且 Komga 端已启用 Kobo 代理/API key。
+
 ## LLM 功能说明
 
-管线提供两个独立的 LLM 功能，均使用同一个 OpenAI 兼容接口（推荐 Gemini Flash）。
+管线提供三类 LLM 调用，均使用同一个 OpenAI 兼容接口（推荐 Gemini Flash）。
 
-### 功能一：文件名归一化（`llm_normalize_enabled`）
+### 功能一：合集系列锚点
 
-在正则解析文件名之后，LLM 会对文件名重新理解，输出：
+当待处理文件位于 `inbox/<合集目录>/` 下时，管线会先对合集目录做一次 LLM 解析：
+
+- 输入：父目录名和该目录下的文件名列表。
+- 输出：整套书共用的正式系列名、繁中/日文标题、别名、作者、出版社提示和分平台检索词。
+- 存储：写入 SQLite 的 `series_anchors` 表，同一个合集目录后续卷复用同一个锚点。
+
+如果开启了 `llm_normalize_enabled`，但合集锚点无法生成，管线会把任务置为 `needs_review`，不会退回本地正则解析继续刮削。
+
+### 功能二：文件名归一化（`llm_normalize_enabled`）
+
+LLM 会直接理解原始文件名，输出：
 
 - `clean_title`：剔除扫描组、出版社、格式标记后的纯系列名
 - `titles.traditional_chinese`：台版繁体正式书名
@@ -85,21 +101,24 @@ MANGA_PIPELINE_LOG_LEVEL=INFO
 - `scraping_queries.bookwalker_tw`：专门用于 BookWalker 台湾的检索词列表
 - `scraping_queries.bookwalker_jp`：专门用于 BookWalker 日本的检索词列表
 - `scraping_queries.bangumi`：专门用于 Bangumi 的检索词列表
-- `parse_status`：`ok / ambiguous / insufficient`，影响置信度判断
+- `parse_status`：`ok / ambiguous / insufficient`
 - `warnings`：解析风险提示
 
-这些结果会直接喂给下游刮削器作为搜索词，替代纯正则解析的结果。
+这些结果会直接喂给下游刮削器作为搜索词。开启 LLM 时，管线不会把本地正则解析当作兜底刮削依据；LLM 连接失败或无法解析会进入 `needs_review`。
 
-### 功能二：刮削结果 LLM 验证（`llm_verify_scrape_enabled`）
+### 功能三：刮削结果 LLM 验证（`llm_verify_scrape_enabled`）
 
 在每个刮削平台（BookWalker TW / JP / Bangumi）返回结果之后，LLM 会额外判断：
 **刮削结果描述的是否与原始文件同一部作品？**
 
 - 如果 LLM 认为不匹配（如系列名换了、卷号差异过大），该候选会被拒绝，管线继续尝试下一个平台。
-- 如果 LLM 确认匹配，置信度会额外 +最多 0.15（按 LLM 的确定性比例）。
+- 如果开启了验证但候选无法得到 LLM 确认，该候选会被拒绝。
+- 如果 LLM 高置信确认匹配，候选置信度可以提升到平台阈值以上，避免代码相似度评分误伤跨语言正式标题。
 
 此功能会额外消耗 API 调用次数（每本书最多 3 次），但可显著减少错误刮削。
 Gemini Flash Lite 免费层通常有充裕余量。
+
+LLM 请求支持重试；默认最多 3 次，按线性 backoff 等待。
 
 ### 配置 LLM
 
@@ -127,6 +146,10 @@ metadata:
   llm_model: gemini-3.1-flash-lite
   llm_api_key_file: /run/secrets/gemini_api_key
   llm_api_key_env: GEMINI_API_KEY  # 备用环境变量，优先使用文件
+  llm_timeout_seconds: 30
+  llm_max_retries: 3
+  llm_retry_backoff_seconds: 2.0
+  llm_verify_accept_confidence: 0.7
 ```
 
 密钥文件会只读挂载进容器。不要把密钥写进仓库。
@@ -189,6 +212,8 @@ inbox/
 ```
 
 其中 `1.zip`、`2.cbz` 这种纯数字文件名会按卷号处理；`4/` 这种直接包含图片的子目录会先打包成单本 CBZ。只处理这一层，不处理 `卷号/章节/图片` 这种多层目录。
+
+合集目录名是系列锚点的主要依据。建议一套书放在同一个父目录下，即使单本文件名不规范，也让 LLM 通过目录名和整套文件列表判断系列。刮削完成后，管线才会按锚点和卷号生成规范文件名。
 
 查看日志：
 
@@ -272,6 +297,9 @@ metadata:
   llm_api_key_file: /run/secrets/gemini_api_key
   llm_api_key_env: GEMINI_API_KEY
   llm_timeout_seconds: 30
+  llm_max_retries: 3
+  llm_retry_backoff_seconds: 2.0
+  llm_verify_accept_confidence: 0.7
 
 komga:
   base_uri: http://komga:25600
@@ -340,11 +368,14 @@ ruff check src tests
 ## 注意事项
 
 - `data/`、`.env`、`config.yaml`、数据库和日志不会提交到仓库。
-- BookWalker 台湾没有可接受条目时，管线会尝试 BookWalker 日本；日本站也没有达标时再尝试 Bangumi；都没有达标时才保留文件名解析结果。
+- BookWalker 台湾没有可接受条目时，管线会尝试 BookWalker 日本；日本站也没有达标时再尝试 Bangumi。三层都没有达标时，未开启 LLM 验证的任务会保留文件名/LLM 解析结果；开启 LLM 验证的任务会进入 `needs_review`。
+- 开启 LLM 文件名归一化时，LLM 是刮削参数的来源。LLM 不可用时任务会进入 `needs_review`，不会用本地正则结果继续自动入库。
+- 合集目录会生成持久化系列锚点；如果需要让同一个目录重新学习系列名，需要清理 `series_anchors` 中对应 `collection_title` 后再重跑。
+- 刮削结果是否接受由 LLM 验证和平台阈值共同决定；代码相似度只负责平台候选排序和基础阈值，不再强行判断跨语言标题是否同一作品。
 - PDF 默认用 `pdfimages` 直接抽取内嵌图片，避免整页重渲染导致速度慢和体积暴涨。
 - `pdftoppm` 只作为显式启用的渲染 fallback；默认不自动回退。
-- LLM 只做文件名前置规范化和检索候选生成，不直接替代外部书籍元数据。
-- 同一个文件内容会按 SHA-256 去重，重复放入不会再次处理。
+- LLM 负责文件名/目录归一化、检索候选生成和刮削结果验证；外部书籍元数据仍来自 BookWalker 台湾、BookWalker 日本或 Bangumi。
+- 同一个文件内容会按 SHA-256 去重，重复放入不会再次处理。若要替换已入库同卷，请放入更大的新源文件。
 
 ## License
 

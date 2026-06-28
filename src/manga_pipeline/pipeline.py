@@ -11,6 +11,7 @@ import fcntl
 import re
 import shutil
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 from manga_pipeline.bangumi import search_bangumi
@@ -36,11 +37,21 @@ from manga_pipeline.epub_metadata import write_epub_metadata
 from manga_pipeline.filename_parser import ParseResult, parse_filename
 from manga_pipeline.kcc import run_kcc
 from manga_pipeline.komga import get_library_id, trigger_library_scan
-from manga_pipeline.llm_metadata import LlmMetadata, ScrapeVerification, normalize_with_llm, verify_scrape_with_llm
+from manga_pipeline.llm_metadata import (
+    LlmMetadata,
+    ScrapeVerification,
+    normalize_collection_with_llm,
+    normalize_with_llm,
+    verify_scrape_with_llm,
+)
 from manga_pipeline.logging_config import get_logger
-from manga_pipeline.models import MangaRecord, ProcessingStatus
+from manga_pipeline.models import (
+    SUPPORTED_EXTENSIONS,
+    MangaRecord,
+    ProcessingStatus,
+    SeriesAnchor,
+)
 from manga_pipeline.normalizer import normalize_to_cbz
-from manga_pipeline.review import move_to_review
 
 logger = get_logger(__name__)
 
@@ -383,8 +394,6 @@ def _search_best_bookwalker_metadata(
 ) -> BookwalkerMetadata | None:
     best: BookwalkerMetadata | None = None
     for title in titles:
-        if not _title_candidate_matches_record_context(title, parsed, record):
-            continue
         try:
             metadata = search_func(
                 title,
@@ -403,19 +412,19 @@ def _search_best_bookwalker_metadata(
             continue
         if metadata is None:
             continue
-        if not _metadata_matches_record_context(metadata, parsed, record):
-            logger.info(
-                "[ID:%s] %s rejected context mismatch: %s",
-                record_id,
-                provider_name,
-                metadata.series or metadata.title,
-            )
-            continue
         # --- LLM verification ---
         if cfg is not None and filename:
             verification = _verify_candidate(
                 record_id, provider_name, filename, llm_metadata, metadata, cfg
             )
+            if verification is None and cfg.metadata.llm_verify_scrape_enabled:
+                logger.info(
+                    "[ID:%s] %s rejected unverified candidate '%s'",
+                    record_id,
+                    provider_name,
+                    metadata.series or metadata.title,
+                )
+                continue
             if verification is not None and not verification.match:
                 logger.info(
                     "[ID:%s] %s LLM rejected candidate '%s': %s",
@@ -426,15 +435,17 @@ def _search_best_bookwalker_metadata(
                 )
                 continue
             if verification is not None and verification.match:
-                # Boost confidence proportional to LLM certainty
-                boost = verification.confidence * 0.15
-                metadata.confidence = min(1.0, metadata.confidence + boost)
+                metadata.confidence = _verified_candidate_confidence(
+                    metadata.confidence,
+                    verification,
+                    cfg,
+                )
                 logger.info(
-                    "[ID:%s] %s LLM confirmed '%s' (+%.2f boost): %s",
+                    "[ID:%s] %s LLM confirmed '%s' (confidence=%.2f): %s",
                     record_id,
                     provider_name,
                     metadata.series or metadata.title,
-                    boost,
+                    metadata.confidence,
                     verification.reason,
                 )
         if best is None or metadata.confidence > best.confidence:
@@ -467,8 +478,6 @@ def _search_bangumi_metadata(
 
     best = None
     for title in _metadata_search_titles(parsed, record, llm_metadata, "bangumi"):
-        if not _title_candidate_matches_record_context(title, parsed, record):
-            continue
         try:
             metadata = search_bangumi(
                 title,
@@ -481,17 +490,17 @@ def _search_bangumi_metadata(
             continue
         if metadata is None:
             continue
-        if not _metadata_matches_record_context(metadata, parsed, record):
-            logger.info(
-                "[ID:%s] Bangumi rejected context mismatch: %s",
-                record_id,
-                metadata.series or metadata.title,
-            )
-            continue
         # --- LLM verification ---
         verification = _verify_candidate(
             record_id, "Bangumi", record.file_name, llm_metadata, metadata, cfg
         )
+        if verification is None and cfg.metadata.llm_verify_scrape_enabled:
+            logger.info(
+                "[ID:%s] Bangumi rejected unverified candidate '%s'",
+                record_id,
+                metadata.series or metadata.title,
+            )
+            continue
         if verification is not None and not verification.match:
             logger.info(
                 "[ID:%s] Bangumi LLM rejected candidate '%s': %s",
@@ -501,13 +510,16 @@ def _search_bangumi_metadata(
             )
             continue
         if verification is not None and verification.match:
-            boost = verification.confidence * 0.15
-            metadata.confidence = min(1.0, metadata.confidence + boost)
+            metadata.confidence = _verified_candidate_confidence(
+                metadata.confidence,
+                verification,
+                cfg,
+            )
             logger.info(
-                "[ID:%s] Bangumi LLM confirmed '%s' (+%.2f boost): %s",
+                "[ID:%s] Bangumi LLM confirmed '%s' (confidence=%.2f): %s",
                 record_id,
                 metadata.series or metadata.title,
-                boost,
+                metadata.confidence,
                 verification.reason,
             )
         if best is None or metadata.confidence > best.confidence:
@@ -550,6 +562,244 @@ def _verify_candidate(
         scraped_author=str(getattr(metadata, "author_text", "") or ""),
         cfg=cfg.metadata,
     )
+
+
+def _verified_candidate_confidence(
+    provider_confidence: float,
+    verification: ScrapeVerification,
+    cfg: PipelineConfig,
+) -> float:
+    """Let high-confidence LLM verification override provider scorer limits."""
+    confidence = max(provider_confidence, verification.confidence)
+    if verification.confidence >= cfg.metadata.llm_verify_accept_confidence:
+        provider_threshold = max(
+            cfg.metadata.bookwalker_tw_min_confidence,
+            cfg.metadata.bookwalker_jp_min_confidence,
+            cfg.metadata.bangumi_min_confidence,
+        )
+        confidence = max(confidence, provider_threshold)
+    return min(1.0, confidence)
+
+
+def _get_or_create_series_anchor(
+    record_id: int,
+    record: MangaRecord,
+    cfg: PipelineConfig,
+    db: Database,
+    control: ControlStore,
+) -> tuple[SeriesAnchor | None, LlmMetadata | None]:
+    """Return the collection-level series anchor, creating it from the folder once."""
+    if not _has_real_collection_path(record):
+        return None, None
+
+    existing = db.get_series_anchor(record.collection_title)
+    if existing is not None:
+        return existing, _anchor_to_llm_metadata(existing)
+
+    filenames = _collection_filenames(record)
+    try:
+        metadata = normalize_collection_with_llm(
+            record.collection_title,
+            filenames,
+            cfg.metadata,
+        )
+    except Exception as e:
+        logger.warning("[ID:%s] LLM series anchor normalization failed: %s", record_id, e)
+        with contextlib.suppress(Exception):
+            control.log_llm_run(
+                record_id=record_id,
+                source_name=record.collection_title,
+                prompt=control.get_active_prompt(),
+                error=str(e),
+            )
+        return None, None
+
+    if metadata is None:
+        return None, None
+
+    control.log_llm_run(
+        record_id=record_id,
+        source_name=record.collection_title,
+        prompt=metadata.prompt,
+        response=metadata.raw_content,
+        parsed_json={
+            "title": metadata.title,
+            "title_tw": metadata.title_tw,
+            "title_jp": metadata.title_jp,
+            "author": metadata.author,
+            "publisher": metadata.publisher,
+            "search_titles": metadata.search_titles or [],
+            "confidence": metadata.confidence,
+            "scope": "series_anchor",
+        },
+        elapsed_ms=metadata.elapsed_ms,
+    )
+
+    canonical_series = _anchor_canonical_series(metadata, record.collection_title, cfg)
+    if not canonical_series:
+        return None, metadata
+
+    anchor = SeriesAnchor(
+        collection_title=record.collection_title,
+        canonical_series=canonical_series,
+        title_tw=metadata.title_tw,
+        title_jp=metadata.title_jp,
+        author=metadata.author,
+        publisher=metadata.publisher,
+        queries_tw=metadata.queries_tw,
+        queries_jp=metadata.queries_jp,
+        queries_bangumi=metadata.queries_bangumi,
+        aliases=metadata.search_titles or [],
+    )
+    db.upsert_series_anchor(anchor)
+    logger.info(
+        "[ID:%s] Created series anchor for '%s': %s",
+        record_id,
+        record.collection_title,
+        anchor.canonical_series,
+    )
+    return anchor, _anchor_to_llm_metadata(anchor)
+
+
+def _has_real_collection_path(record: MangaRecord) -> bool:
+    if not record.collection_title or not record.original_path:
+        return False
+    return Path(record.original_path).parent.name == record.collection_title
+
+
+def _collection_filenames(record: MangaRecord) -> list[str]:
+    source_path = Path(record.original_path)
+    parent = source_path.parent
+    if not record.collection_title or not parent.is_dir():
+        return [record.file_name]
+
+    names: list[str] = []
+    for child in sorted(parent.iterdir()):
+        if child.is_file() and child.suffix.lower() in SUPPORTED_EXTENSIONS:
+            names.append(child.name)
+        elif child.is_dir():
+            names.append(child.name)
+    return names[:80] or [record.file_name]
+
+
+def _anchor_canonical_series(
+    metadata: LlmMetadata,
+    collection_title: str,
+    cfg: PipelineConfig,
+) -> str:
+    candidates = _dedupe_titles(
+        [
+            metadata.title_tw,
+            metadata.title,
+            metadata.title_jp,
+            collection_title,
+            *(metadata.search_titles or []),
+        ]
+    )
+    existing = _find_existing_komga_series_name(cfg, candidates)
+    if existing:
+        return _canonical_series_name(existing)
+    return _canonical_series_name(metadata.title_tw or metadata.title or metadata.title_jp or collection_title)
+
+
+def _find_existing_komga_series_name(
+    cfg: PipelineConfig,
+    names: list[str],
+) -> str:
+    if not cfg.paths.komga_library.is_dir():
+        return ""
+
+    expected_keys = {
+        _title_key(name)
+        for name in names + [to_bookwalker_traditional(name) for name in names]
+        if name
+    }
+    expected_keys.discard("")
+    if not expected_keys:
+        return ""
+
+    for child in sorted(cfg.paths.komga_library.iterdir()):
+        if child.is_dir() and _title_key(child.name) in expected_keys:
+            return child.name
+    return ""
+
+
+def _anchor_to_llm_metadata(anchor: SeriesAnchor) -> LlmMetadata:
+    return LlmMetadata(
+        title=anchor.canonical_series,
+        title_tw=anchor.title_tw or anchor.canonical_series,
+        title_jp=anchor.title_jp,
+        author=anchor.author,
+        publisher=anchor.publisher,
+        queries_tw=anchor.queries_tw,
+        queries_jp=anchor.queries_jp,
+        queries_bangumi=anchor.queries_bangumi,
+        search_titles=_dedupe_titles(
+            [
+                anchor.canonical_series,
+                anchor.title_tw,
+                anchor.title_jp,
+                *anchor.aliases,
+                *anchor.queries_tw,
+                *anchor.queries_jp,
+                *anchor.queries_bangumi,
+            ]
+        ),
+        parse_status="ok",
+        verified=True,
+        verification_level="series_anchor",
+        confidence=0.85,
+    )
+
+
+def _merge_anchor_metadata(
+    llm_metadata: LlmMetadata | None,
+    anchor: SeriesAnchor | None,
+) -> LlmMetadata | None:
+    if anchor is None:
+        return llm_metadata
+
+    anchor_metadata = _anchor_to_llm_metadata(anchor)
+    if llm_metadata is None:
+        return anchor_metadata
+
+    llm_metadata.title = anchor.canonical_series
+    llm_metadata.title_tw = anchor.title_tw or anchor.canonical_series
+    llm_metadata.title_jp = anchor.title_jp or llm_metadata.title_jp
+    llm_metadata.author = llm_metadata.author or anchor.author
+    llm_metadata.publisher = llm_metadata.publisher or anchor.publisher
+    llm_metadata.queries_tw = _dedupe_titles(anchor_metadata.queries_tw + llm_metadata.queries_tw)
+    llm_metadata.queries_jp = _dedupe_titles(anchor_metadata.queries_jp + llm_metadata.queries_jp)
+    llm_metadata.queries_bangumi = _dedupe_titles(
+        anchor_metadata.queries_bangumi + llm_metadata.queries_bangumi
+    )
+    llm_metadata.search_titles = _dedupe_titles(
+        (anchor_metadata.search_titles or []) + (llm_metadata.search_titles or [])
+    )
+    llm_metadata.confidence = max(llm_metadata.confidence, anchor_metadata.confidence)
+    return llm_metadata
+
+
+def _apply_series_anchor(
+    parsed: ParseResult,
+    anchor: SeriesAnchor | None,
+) -> None:
+    if anchor is None:
+        return
+    parsed.title = anchor.canonical_series
+    parsed.series = anchor.canonical_series
+    parsed.author = parsed.author or anchor.author
+    parsed.publisher = parsed.publisher or anchor.publisher
+    parsed.confidence = max(parsed.confidence, 0.85)
+
+
+def _dedupe_titles(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        title = value.strip()
+        if title and title not in result:
+            result.append(title)
+    return result
 
 
 def _collect_metadata_candidates(
@@ -605,8 +855,10 @@ def _metadata_search_titles(
         else:  # bangumi
             titles.extend(llm_metadata.queries_bangumi)
             titles.extend([llm_metadata.title_jp, llm_metadata.title_tw, llm_metadata.title])
-    titles.extend([parsed.title, parsed.series])
-    if record.collection_title:
+        titles.extend([parsed.title, parsed.series])
+    else:
+        titles.extend([parsed.title, parsed.series])
+    if llm_metadata is None and record.collection_title:
         collection = _parse_collection_title(record.collection_title)
         titles.extend([collection.title, record.collection_title])
 
@@ -651,7 +903,7 @@ def _metadata_matches_record_context(
         return True
 
     collection = _parse_collection_title(record.collection_title)
-    expected_title = collection.title or parsed.series or parsed.title
+    expected_title = parsed.series or parsed.title or collection.title
     if not expected_title:
         return True
 
@@ -689,7 +941,7 @@ def _title_candidate_matches_record_context(
         return True
 
     collection = _parse_collection_title(record.collection_title)
-    expected_title = collection.title or parsed.series or parsed.title
+    expected_title = parsed.series or parsed.title or collection.title
     if not expected_title or not title:
         return True
 
@@ -758,7 +1010,13 @@ def _title_aliases(key: str) -> list[str]:
         "灌籃高手": ("slamdunk",),
         "灌篮高手": ("slamdunk",),
     }
-    return list(aliases.get(key, ()))
+    result = list(aliases.get(key, ()))
+    for noise in ("evangelion", "eva"):
+        if noise in key:
+            alias = key.replace(noise, "")
+            if alias and alias not in result:
+                result.append(alias)
+    return result
 
 
 def _edition_markers(value: str) -> set[str]:
@@ -805,19 +1063,47 @@ def _step_parse_metadata(
     db: Database,
 ) -> bool:
     """Parse filename metadata."""
-    parsed = parse_filename(record.file_name)
-    if record.collection_title:
-        _apply_collection_title(parsed, record.collection_title)
+    parsed = ParseResult()
     control = ControlStore(db.db_path.parent)
     llm_run_id: int | None = None
+    series_anchor, _anchor_metadata = _get_or_create_series_anchor(
+        record_id,
+        record,
+        cfg,
+        db,
+        control,
+    )
+    if (
+        _has_real_collection_path(record)
+        and cfg.metadata.llm_normalize_enabled
+        and series_anchor is None
+    ):
+        logger.warning(
+            "[ID:%s] LLM series anchor unavailable, sending to review: %s",
+            record_id,
+            record.collection_title,
+        )
+        db.update_status(
+            record_id,
+            ProcessingStatus.NEEDS_REVIEW,
+            error_message="LLM series anchor unavailable",
+        )
+        control.close()
+        return False
+
     try:
-        source_name = (
+        source_name = record.file_name if series_anchor else (
             f"{record.collection_title} {record.file_name}"
             if record.collection_title
             else record.file_name
         )
         prompt = control.get_active_prompt()
-        llm_metadata = normalize_with_llm(source_name, parsed, cfg.metadata, prompt)
+        file_llm_metadata = normalize_with_llm(source_name, parsed, cfg.metadata, prompt)
+        llm_metadata = (
+            _merge_anchor_metadata(file_llm_metadata, series_anchor)
+            if file_llm_metadata is not None
+            else None
+        )
         if llm_metadata is not None:
             llm_run_id = control.log_llm_run(
                 record_id=record_id,
@@ -862,26 +1148,37 @@ def _step_parse_metadata(
                 record_id,
                 "; ".join(llm_metadata.warnings),
             )
-        # Apply LLM result when status is ok/ambiguous and confidence is useful.
-        # For 'insufficient' the LLM itself says it cannot parse; still use
-        # what little it found but keep confidence low.
-        apply_threshold = 0.5 if status == "ok" else 0.4
-        if llm_metadata.confidence >= apply_threshold:
-            logger.info(
-                "[ID:%s] LLM applied: title=%s, author=%s, vol=%s",
-                record_id,
-                llm_metadata.title,
-                llm_metadata.author,
-                llm_metadata.volume,
-            )
-            parsed.title = llm_metadata.title or parsed.title
-            parsed.series = llm_metadata.title or parsed.series
-            parsed.author = llm_metadata.author or parsed.author
-            parsed.publisher = llm_metadata.publisher or parsed.publisher
-            parsed.volume = llm_metadata.volume or parsed.volume
-            parsed.confidence = max(parsed.confidence, llm_metadata.confidence)
-            if record.collection_title:
-                _apply_collection_title(parsed, record.collection_title)
+        logger.info(
+            "[ID:%s] LLM applied: title=%s, author=%s, vol=%s",
+            record_id,
+            llm_metadata.title,
+            llm_metadata.author,
+            llm_metadata.volume,
+        )
+        parsed.title = llm_metadata.title
+        parsed.series = llm_metadata.title
+        parsed.author = llm_metadata.author
+        parsed.publisher = llm_metadata.publisher
+        parsed.volume = llm_metadata.volume
+        parsed.confidence = llm_metadata.confidence
+        _apply_series_anchor(parsed, series_anchor)
+    elif cfg.metadata.llm_normalize_enabled:
+        logger.warning(
+            "[ID:%s] LLM filename normalization unavailable, sending to review: %s",
+            record_id,
+            record.file_name,
+        )
+        db.update_status(
+            record_id,
+            ProcessingStatus.NEEDS_REVIEW,
+            error_message="LLM filename normalization unavailable",
+        )
+        return False
+    else:
+        parsed = parse_filename(record.file_name)
+        if record.collection_title:
+            _apply_collection_title(parsed, record.collection_title)
+        _apply_series_anchor(parsed, series_anchor)
 
     mode = control.get_mode()
     if mode in {MODE_MANUAL_BOOK, MODE_MANUAL_SERIES}:
@@ -895,6 +1192,7 @@ def _step_parse_metadata(
             selected = _select_policy_candidate(candidates, policy)
             if selected is not None:
                 _apply_review_candidate(parsed, selected)
+                _apply_series_anchor(parsed, series_anchor)
                 db.update_status(
                     record_id,
                     ProcessingStatus.METADATA_PARSED,
@@ -946,10 +1244,11 @@ def _step_parse_metadata(
         )
         parsed.title = bookwalker.series or parsed.title
         parsed.series = bookwalker.series or parsed.series or parsed.title
-        parsed.volume = bookwalker.volume or parsed.volume
+        parsed.volume = _metadata_volume(parsed.volume, bookwalker.volume)
         parsed.author = bookwalker.author_text or parsed.author
         parsed.publisher = bookwalker.publisher or parsed.publisher
         parsed.confidence = max(parsed.confidence, bookwalker.confidence)
+        _apply_series_anchor(parsed, series_anchor)
     else:
         bookwalker_jp = _search_bookwalker_jp_metadata(
             record_id,
@@ -969,10 +1268,11 @@ def _step_parse_metadata(
             )
             parsed.title = bookwalker_jp.series or parsed.title
             parsed.series = bookwalker_jp.series or parsed.series or parsed.title
-            parsed.volume = bookwalker_jp.volume or parsed.volume
+            parsed.volume = _metadata_volume(parsed.volume, bookwalker_jp.volume)
             parsed.author = bookwalker_jp.author_text or parsed.author
             parsed.publisher = bookwalker_jp.publisher or parsed.publisher
             parsed.confidence = max(parsed.confidence, bookwalker_jp.confidence)
+            _apply_series_anchor(parsed, series_anchor)
 
     if accepted_metadata is None:
         bangumi = _search_bangumi_metadata(
@@ -993,10 +1293,11 @@ def _step_parse_metadata(
             )
             parsed.title = bangumi.series or parsed.title
             parsed.series = bangumi.series or parsed.series or parsed.title
-            parsed.volume = bangumi.volume or parsed.volume
+            parsed.volume = _metadata_volume(parsed.volume, bangumi.volume)
             parsed.author = bangumi.author_text or parsed.author
             parsed.publisher = bangumi.publisher or parsed.publisher
             parsed.confidence = max(parsed.confidence, bangumi.confidence)
+            _apply_series_anchor(parsed, series_anchor)
 
     logger.info(
         "[ID:%s] Parsed %s: title=%s, author=%s, vol=%s (confidence=%.2f)",
@@ -1008,6 +1309,19 @@ def _step_parse_metadata(
         parsed.confidence,
     )
 
+    if cfg.metadata.llm_verify_scrape_enabled and accepted_metadata is None:
+        logger.warning(
+            "[ID:%s] No LLM-verified metadata candidate, sending to review: %s",
+            record_id,
+            record.file_name,
+        )
+        db.update_status(
+            record_id,
+            ProcessingStatus.NEEDS_REVIEW,
+            error_message="No LLM-verified metadata candidate",
+        )
+        return False
+
     # Check confidence threshold
     threshold = cfg.metadata.confidence_auto_accept
     if parsed.confidence < threshold:
@@ -1018,18 +1332,6 @@ def _step_parse_metadata(
             threshold,
             record.file_name,
         )
-        file_path = Path(record.original_path)
-        if file_path.is_file():
-            move_to_review(
-                file_path,
-                cfg.paths.manual_review,
-                reason=f"Low confidence: {parsed.confidence:.2f}",
-                parsed_metadata={
-                    "title": parsed.title,
-                    "author": parsed.author,
-                    "volume": parsed.volume,
-                },
-            )
         db.update_status(
             record_id,
             ProcessingStatus.NEEDS_REVIEW,
@@ -1038,6 +1340,8 @@ def _step_parse_metadata(
         return False
 
     # Update record with parsed metadata
+    parsed.series = _canonical_series_name(parsed.series or parsed.title)
+    _apply_series_anchor(parsed, series_anchor)
     db.update_status(
         record_id,
         ProcessingStatus.METADATA_PARSED,
@@ -1070,10 +1374,20 @@ def _select_policy_candidate(
 def _apply_review_candidate(parsed: ParseResult, candidate: MetadataCandidate) -> None:
     parsed.title = candidate.series or candidate.title or parsed.title
     parsed.series = candidate.series or parsed.series or parsed.title
-    parsed.volume = candidate.volume or parsed.volume
+    parsed.volume = _metadata_volume(parsed.volume, candidate.volume)
     parsed.author = candidate.author or parsed.author
     parsed.publisher = candidate.publisher or parsed.publisher
     parsed.confidence = max(parsed.confidence, candidate.confidence)
+
+
+def _metadata_volume(parsed_volume: str, metadata_volume: str) -> str:
+    """Prefer the source filename volume over provider volume metadata.
+
+    Provider records often describe only one purchasable volume or subject entry.
+    For files inside a complete-series folder (for example BTX01.zip ... BTX16.zip),
+    the filename is the source of truth for the individual book number.
+    """
+    return parsed_volume or metadata_volume
 
 
 def _candidate_record_fields(
@@ -1114,6 +1428,16 @@ def _step_normalize_and_archive(
     try:
         # Build a clean filename
         clean_name = _build_clean_name(record)
+        target_archive = cfg.paths.archive_cbz / f"{clean_name}.cbz"
+        if target_archive.exists():
+            _prepare_existing_volume_replacement(
+                record_id=record_id,
+                record=record,
+                cfg=cfg,
+                source_path=file_path,
+                clean_name=clean_name,
+                target_archive=target_archive,
+            )
 
         # Normalize to CBZ in archive directory
         archive_path = normalize_to_cbz(
@@ -1157,6 +1481,107 @@ def _step_normalize_and_archive(
             error_message=f"Normalization failed: {e}",
         )
         return False
+
+
+def _prepare_existing_volume_replacement(
+    record_id: int,
+    record: MangaRecord,
+    cfg: PipelineConfig,
+    source_path: Path,
+    clean_name: str,
+    target_archive: Path,
+) -> None:
+    """Move generated files aside when a larger source replaces an old volume."""
+    source_size = source_path.stat().st_size
+    archive_size = target_archive.stat().st_size
+    if source_size <= archive_size:
+        raise FileExistsError(
+            f"Archive target already exists and source is not larger: {target_archive}"
+        )
+
+    backup_dir = _replacement_backup_dir(cfg, record_id, clean_name)
+    moved: list[Path] = []
+    for artifact in _replacement_artifact_candidates(record, cfg, clean_name):
+        if artifact.is_file():
+            moved.append(_move_replacement_artifact(artifact, backup_dir, cfg))
+
+    logger.info(
+        "[ID:%s] Preparing larger replacement for %s "
+        "(source=%d bytes, existing_archive=%d bytes, moved=%d, backup=%s)",
+        record_id,
+        clean_name,
+        source_size,
+        archive_size,
+        len(moved),
+        backup_dir,
+    )
+
+
+def _replacement_backup_dir(
+    cfg: PipelineConfig,
+    record_id: int,
+    clean_name: str,
+) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = (
+        cfg.paths.processing
+        / "replacement-backups"
+        / f"{timestamp}-id{record_id}-{_sanitize_filename(clean_name)}"
+    )
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    return backup_dir
+
+
+def _replacement_artifact_candidates(
+    record: MangaRecord,
+    cfg: PipelineConfig,
+    clean_name: str,
+) -> list[Path]:
+    series_dir = cfg.paths.komga_library / _sanitize_dirname(
+        record.series or record.title or "Unknown"
+    )
+    archive_path = cfg.paths.archive_cbz / f"{clean_name}.cbz"
+    ready_path = cfg.paths.kepub_ready / f"{clean_name}.kepub.epub"
+    imported_path = series_dir / f"{clean_name}.kepub.epub"
+
+    candidates = [
+        archive_path,
+        ready_path,
+        ready_path.with_suffix(".jpg"),
+        imported_path,
+        imported_path.with_suffix(".jpg"),
+    ]
+    if record.archive_path:
+        candidates.append(Path(record.archive_path))
+    if record.converted_path:
+        converted_path = Path(record.converted_path)
+        candidates.extend([converted_path, converted_path.with_suffix(".jpg")])
+
+    return list(dict.fromkeys(candidates))
+
+
+def _move_replacement_artifact(
+    artifact: Path,
+    backup_dir: Path,
+    cfg: PipelineConfig,
+) -> Path:
+    try:
+        relative = artifact.relative_to(cfg.paths.archive_cbz)
+        destination = backup_dir / "archive_cbz" / relative
+    except ValueError:
+        try:
+            relative = artifact.relative_to(cfg.paths.kepub_ready)
+            destination = backup_dir / "kepub_ready" / relative
+        except ValueError:
+            try:
+                relative = artifact.relative_to(cfg.paths.komga_library)
+                destination = backup_dir / "komga-library" / relative
+            except ValueError:
+                destination = backup_dir / "other" / artifact.name
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(artifact), str(destination))
+    return destination
 
 
 def _step_convert_kcc(
@@ -1465,9 +1890,21 @@ def _parse_collection_title(collection_title: str) -> ParseResult:
 
 def _collection_title_bracket_index(bracketed: list[str]) -> int:
     first = bracketed[0].strip()
-    if len(bracketed) >= 2 and "_" in first:
+    if len(bracketed) >= 2 and _looks_like_author_group(first):
         return 1
     return 0
+
+
+def _looks_like_author_group(value: str) -> bool:
+    """Return whether a bracket looks like author/circle credits, not a title."""
+    value = value.strip()
+    if "_" in value:
+        return True
+    if re.search(r"[×・·．/／&＆]", value) and re.search(
+        r"[\u3040-\u30ff\u3400-\u9fffA-Za-z]", value
+    ):
+        return True
+    return False
 
 
 def _remove_empty_inbox_parent(path: Path, cfg: PipelineConfig) -> None:
@@ -1537,7 +1974,7 @@ def _build_clean_name(record: MangaRecord) -> str:
 
 def _build_series_name(record: MangaRecord) -> str:
     """Return the canonical series name used for Komga folders and metadata."""
-    return _sanitize_dirname(record.series or record.title or "")
+    return _sanitize_dirname(_canonical_series_name(record.series or record.title or ""))
 
 
 def _build_book_title(record: MangaRecord) -> str:
@@ -1546,6 +1983,25 @@ def _build_book_title(record: MangaRecord) -> str:
     if record.volume:
         return f"{title} 卷{record.volume}"
     return title
+
+
+def _canonical_series_name(value: str) -> str:
+    """Normalize provider-specific label suffixes out of Komga series names."""
+    value = value.strip()
+    if not value:
+        return ""
+    label_suffixes = (
+        "ビッグコミックス",
+        "ジャンプコミックス",
+        "ジャンプコミックスDIGITAL",
+        "少年サンデーコミックス",
+        "少年マガジンコミックス",
+        "モーニングコミックス",
+        "ヤングジャンプコミックス",
+    )
+    pattern = "|".join(re.escape(label) for label in label_suffixes)
+    value = re.sub(rf"\s*(?:\(({pattern})\)|\uFF08({pattern})\uFF09)\s*$", "", value)
+    return value.strip()
 
 
 def _format_volume_token(volume: str) -> str:

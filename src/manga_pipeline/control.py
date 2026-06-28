@@ -17,15 +17,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from manga_pipeline.llm_metadata import SYSTEM_PROMPT
 from manga_pipeline.models import MangaRecord
 
-DEFAULT_LLM_PROMPT = (
+LEGACY_DEFAULT_LLM_PROMPT = (
     "你是漫画电子书文件名标准化器。只输出 JSON, 不要解释。"
     "你的任务是从可能不准确的文件名推断正式书名和检索关键词。"
     "优先给出台版正式书名; 如台版可能不存在, 同时给出日版正式书名。"
     "重点给出可用于 BookWalker 台湾、BookWalker 日本、Bangumi 检索的别名。"
     "不要编造出版社; 不确定则留空。"
 )
+DEFAULT_LLM_PROMPT = SYSTEM_PROMPT
 
 MODE_AUTO = "auto"
 MODE_MANUAL_BOOK = "manual_book"
@@ -138,7 +140,8 @@ class ControlStore:
             );
             """
         )
-        if self.get_active_prompt() == "":
+        active_prompt = self.get_active_prompt()
+        if active_prompt in {"", LEGACY_DEFAULT_LLM_PROMPT}:
             self.set_active_prompt(DEFAULT_LLM_PROMPT)
         if not self.get_setting("control_mode"):
             self.set_mode(MODE_AUTO)

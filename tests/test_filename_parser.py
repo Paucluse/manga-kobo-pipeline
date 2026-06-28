@@ -70,6 +70,12 @@ class TestVolumePatterns:
         assert result.volume == "1"
         assert result.title == "ダンジョン飯"
 
+    def test_compact_ascii_title_number(self) -> None:
+        """Compact release names like BTX01 should still expose the volume."""
+        result = parse_filename("BTX01.zip")
+        assert result.volume == "1"
+        assert result.title == "BTX"
+
     def test_volume_10(self) -> None:
         """Double digit volume."""
         result = parse_filename("みなみけ 第10巻.cbz")

@@ -69,6 +69,8 @@ VOLUME_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^(\d{1,3})$"), "number"),
     # Trailing number: title 01.cbz, title 001.cbz
     (re.compile(r"\s(\d{1,3})$"), "bare"),
+    # Compact trailing number: BTX01.zip
+    (re.compile(r"(?<=[A-Za-z])(\d{1,3})$"), "compact"),
 ]
 
 

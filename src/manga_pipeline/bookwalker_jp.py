@@ -92,6 +92,14 @@ def search_bookwalker_jp(
 
         score = _score_metadata(metadata, title, volume, author)
         metadata.confidence = min(score / 100, 1.0)
+        if not _has_relevance_evidence(metadata, title, author):
+            logger.info(
+                "BookWalker JP ignored volume-only candidate: query=%s volume=%s candidate=%s",
+                title,
+                volume,
+                metadata.series or metadata.title,
+            )
+            continue
         if best is None or metadata.confidence > best.confidence:
             best = metadata
 
@@ -311,6 +319,19 @@ def _score_metadata(
     if metadata.summary:
         score += 5
     return score
+
+
+def _has_relevance_evidence(
+    metadata: BookwalkerMetadata,
+    title: str,
+    author: str,
+) -> bool:
+    """Require title or author evidence before a JP candidate reaches LLM verification."""
+    if _titles_match(metadata.series or metadata.title, title):
+        return True
+    if author and _normalized(author) in _normalized(metadata.author_text):
+        return True
+    return False
 
 
 def _book_item_blocks(html_text: str) -> list[str]:

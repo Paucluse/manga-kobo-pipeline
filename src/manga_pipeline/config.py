@@ -73,6 +73,9 @@ class MetadataConfig(BaseModel):
     llm_api_key_file: Path | None = None
     llm_api_key_env: str = "OPENAI_API_KEY"
     llm_timeout_seconds: int = 30
+    llm_max_retries: int = 3
+    llm_retry_backoff_seconds: float = 2.0
+    llm_verify_accept_confidence: float = 0.7
 
 
 class CommandsConfig(BaseModel):

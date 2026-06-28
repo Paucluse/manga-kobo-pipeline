@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 
 from manga_pipeline.bookwalker_jp import (
+    _has_relevance_evidence,
     _titles_match,
     parse_product_detail,
     parse_search_candidates,
     parse_series_candidates,
 )
+from manga_pipeline.bookwalker_tw import BookwalkerMetadata
 
 FW_TILDE = "\N{FULLWIDTH TILDE}"
 FW_LPAREN = "\N{FULLWIDTH LEFT PARENTHESIS}"
@@ -24,6 +26,36 @@ def test_titles_match_rejects_short_title_substring_false_positive() -> None:
     assert _titles_match(f"銃夢{FW_LPAREN}講談社{FW_RPAREN}", "銃夢")
     assert not _titles_match("木城ゆきと画集 ARS MAGNA デビューから銃夢火星戦記まで", "銃夢")
     assert not _titles_match("銃夢火星戦記", "銃夢")
+
+
+def test_relevance_evidence_rejects_volume_only_unrelated_candidate() -> None:
+    metadata = BookwalkerMetadata(
+        title="ONE PIECE モノクロ版 1",
+        series="ONE PIECE モノクロ版",
+        volume="1",
+        authors=["尾田栄一郎"],
+        publisher="集英社",
+        cover_url="https://example.test/onepiece.jpg",
+    )
+
+    assert not _has_relevance_evidence(metadata, "最終兵器彼女", "高橋しん")
+
+
+def test_relevance_evidence_accepts_title_or_author_match() -> None:
+    title_match = BookwalkerMetadata(
+        title="最終兵器彼女（１）",
+        series="最終兵器彼女",
+        volume="1",
+    )
+    author_match = BookwalkerMetadata(
+        title="別タイトル（１）",
+        series="別タイトル",
+        volume="1",
+        authors=["高橋しん"],
+    )
+
+    assert _has_relevance_evidence(title_match, "最終兵器彼女", "")
+    assert _has_relevance_evidence(author_match, "最終兵器彼女", "高橋しん")
 
 
 def test_parse_search_candidates_reads_series_card() -> None:

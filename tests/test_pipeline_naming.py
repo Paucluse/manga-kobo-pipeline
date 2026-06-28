@@ -8,13 +8,14 @@ from manga_pipeline.bookwalker_tw import BookwalkerMetadata
 from manga_pipeline.config import MetadataConfig, PathsConfig, PipelineConfig
 from manga_pipeline.database import Database
 from manga_pipeline.filename_parser import parse_filename
-from manga_pipeline.llm_metadata import LlmMetadata
+from manga_pipeline.llm_metadata import LlmMetadata, ScrapeVerification
 from manga_pipeline.models import MangaRecord, ProcessingStatus
 from manga_pipeline.pipeline import (
     _apply_collection_title,
     _build_book_title,
     _build_clean_name,
     _build_series_name,
+    _canonical_series_name,
     _download_metadata_artwork,
     _metadata_matches_record_context,
     _metadata_search_titles,
@@ -45,6 +46,10 @@ def test_build_clean_name_uses_series_and_sortable_volume() -> None:
     assert _build_series_name(record) == THREE_BY_THREE_EYES
     assert _build_clean_name(record) == f"{THREE_BY_THREE_EYES} v001"
     assert _build_book_title(record) == f"{THREE_BY_THREE_EYES} 卷1"
+
+
+def test_canonical_series_name_strips_provider_label_suffix() -> None:
+    assert _canonical_series_name("最終兵器彼女（ビッグコミックス）") == "最終兵器彼女"
 
 
 def test_build_clean_name_omits_author_decoration() -> None:
@@ -112,6 +117,23 @@ def test_collection_title_can_use_second_bracket_when_first_is_author_alias() ->
     assert parsed.volume == "1"
 
 
+def test_collection_title_can_use_second_bracket_when_first_is_author_group() -> None:
+    parsed = parse_filename(
+        "[GAINAX×貞本義行][新世紀EVANGELION福音戰士][東販][C.C].Vol.01.zip"
+    )
+
+    _apply_collection_title(
+        parsed,
+        "[GAINAX×貞本義行][新世紀EVANGELION福音戰士][東販][C.C][14完]",
+    )
+
+    assert parsed.title == "新世紀EVANGELION福音戰士"
+    assert parsed.series == "新世紀EVANGELION福音戰士"
+    assert parsed.author == "GAINAX×貞本義行"
+    assert parsed.publisher == "東販"
+    assert parsed.volume == "1"
+
+
 def test_short_collection_title_rejects_substring_false_positive() -> None:
     record = MangaRecord(collection_title="[木城ゆきと_木城幸人][銃夢][東立][9完]")
     parsed = parse_filename("[銃夢(第一部)[木城ゆきと][東立]Vol_03.rar")
@@ -125,6 +147,19 @@ def test_short_collection_title_rejects_substring_false_positive() -> None:
     )
 
     assert _metadata_matches_record_context(metadata, parsed, record) is False
+
+
+def test_collection_title_allows_evangelion_decorative_token() -> None:
+    record = MangaRecord(
+        collection_title="[GAINAX×貞本義行][新世紀EVANGELION福音戰士][東販][C.C][14完]"
+    )
+    parsed = parse_filename(
+        "[GAINAX×貞本義行][新世紀EVANGELION福音戰士][東販][C.C].Vol.01.zip"
+    )
+    _apply_collection_title(parsed, record.collection_title)
+    metadata = BookwalkerMetadata(title="新世紀福音戰士", series="新世紀福音戰士")
+
+    assert _metadata_matches_record_context(metadata, parsed, record) is True
 
 
 def test_plain_collection_title_rejects_unrequested_edition_or_sequel() -> None:
@@ -288,6 +323,491 @@ def test_bangumi_fallback_when_bookwalker_has_no_match(
     assert updated.source_url == "https://bgm.tv/subject/2081"
 
 
+def test_source_filename_volume_wins_over_bangumi_subject_volume(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig(
+        metadata=MetadataConfig(
+            bookwalker_tw_enabled=False,
+            bookwalker_jp_enabled=False,
+            bangumi_enabled=True,
+            bangumi_min_confidence=0.65,
+            llm_normalize_enabled=False,
+        )
+    )
+    db = Database(tmp_path / "pipeline.db")
+    record = MangaRecord(
+        file_name="BTX16.zip",
+        file_hash="btx-v16",
+        collection_title="[B'TX鋼鐵神兵][車田正美][東贩][C.C][1-16完]",
+        current_status=ProcessingStatus.WAITING_STABLE,
+    )
+    record_id = db.insert_record(record)
+
+    def fake_bangumi(*_args: object, **_kwargs: object) -> BangumiMetadata:
+        return BangumiMetadata(
+            subject_id="207906",
+            title="B'T-X (1)",
+            series="B'T-X",
+            volume="1",
+            authors=["車田 正美"],
+            publisher="角川書店",
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bangumi", fake_bangumi)
+
+    try:
+        assert _step_parse_metadata(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.title == "B'T-X"
+    assert updated.series == "B'T-X"
+    assert updated.volume == "16"
+    assert updated.author == "車田 正美"
+
+
+def test_bangumi_candidate_requires_llm_confirmation_when_verify_enabled(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig(
+        metadata=MetadataConfig(
+            bookwalker_tw_enabled=False,
+            bookwalker_jp_enabled=False,
+            bangumi_enabled=True,
+            bangumi_min_confidence=0.65,
+            llm_normalize_enabled=False,
+            llm_verify_scrape_enabled=True,
+            confidence_auto_accept=0.65,
+        )
+    )
+    db = Database(tmp_path / "pipeline.db")
+    source = tmp_path / "BTX16.zip"
+    source.write_bytes(b"zip")
+    record = MangaRecord(
+        original_path=str(source),
+        file_name="BTX16.zip",
+        file_hash="btx-v16",
+        collection_title="[B'TX鋼鐵神兵][車田正美][東贩][C.C][1-16完]",
+        current_status=ProcessingStatus.WAITING_STABLE,
+    )
+    record_id = db.insert_record(record)
+
+    def fake_bangumi(*_args: object, **_kwargs: object) -> BangumiMetadata:
+        return BangumiMetadata(
+            subject_id="207906",
+            title="B'T-X (1)",
+            series="B'T-X",
+            volume="1",
+            authors=["車田 正美"],
+            publisher="角川書店",
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bangumi", fake_bangumi)
+    monkeypatch.setattr("manga_pipeline.pipeline.verify_scrape_with_llm", lambda *_args, **_kwargs: None)
+
+    try:
+        assert _step_parse_metadata(record_id, record, cfg, db) is False
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.NEEDS_REVIEW
+    assert source.exists()
+
+
+def test_high_confidence_llm_verification_overrides_provider_low_confidence(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig(
+        metadata=MetadataConfig(
+            bookwalker_tw_enabled=True,
+            bookwalker_tw_min_confidence=0.65,
+            bookwalker_jp_enabled=False,
+            bangumi_enabled=False,
+            llm_normalize_enabled=True,
+            llm_verify_scrape_enabled=True,
+            llm_model="gemini-3.1-flash-lite",
+            confidence_auto_accept=0.65,
+        )
+    )
+    db = Database(tmp_path / "pipeline.db")
+    record = MangaRecord(
+        file_name="[高橋留美子][亂馬1／2][join].Vol.38.zip",
+        file_hash="ranma-v38",
+        collection_title="[高橋留美子][亂馬1／2][大然][join]38全",
+        current_status=ProcessingStatus.WAITING_STABLE,
+    )
+    record_id = db.insert_record(record)
+
+    def fake_normalize(*_args: object, **_kwargs: object) -> LlmMetadata:
+        return LlmMetadata(
+            title="亂馬1／2",
+            title_tw="亂馬1/2",
+            title_jp="らんま1/2",
+            queries_tw=["亂馬1/2"],
+            author="高橋留美子",
+            volume="38",
+            confidence=0.8,
+        )
+
+    def fake_bookwalker_tw(*_args: object, **_kwargs: object) -> BookwalkerMetadata:
+        return BookwalkerMetadata(
+            product_id="268207",
+            title="亂馬 1/2 (38)",
+            series="亂馬 1/2",
+            volume="38",
+            authors=["高橋留美子"],
+            publisher="尖端出版",
+            confidence=0.2,
+        )
+
+    monkeypatch.setattr("manga_pipeline.pipeline.normalize_with_llm", fake_normalize)
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bookwalker_tw", fake_bookwalker_tw)
+    monkeypatch.setattr(
+        "manga_pipeline.pipeline.verify_scrape_with_llm",
+        lambda *_args, **_kwargs: ScrapeVerification(
+            match=True,
+            confidence=0.95,
+            reason="同一作品同一卷",
+        ),
+    )
+
+    try:
+        assert _step_parse_metadata(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.METADATA_PARSED
+    assert updated.series == "亂馬 1/2"
+    assert float(updated.confidence) >= 0.95
+
+
+def test_collection_series_anchor_overrides_per_volume_scrape_series(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig(
+        paths=PathsConfig(komga_library=tmp_path / "komga-library"),
+        metadata=MetadataConfig(
+            bookwalker_tw_enabled=False,
+            bookwalker_jp_enabled=False,
+            bangumi_enabled=True,
+            bangumi_min_confidence=0.65,
+            llm_normalize_enabled=True,
+            llm_verify_scrape_enabled=True,
+            llm_model="gemini-3.1-flash-lite",
+            confidence_auto_accept=0.65,
+        ),
+    )
+    db = Database(tmp_path / "pipeline.db")
+    collection_dir = tmp_path / "inbox" / "五星物语"
+    collection_dir.mkdir(parents=True)
+    source = collection_dir / "vol_02.zip"
+    source.write_bytes(b"zip")
+    record = MangaRecord(
+        original_path=str(source),
+        file_name=source.name,
+        file_hash="fss-v2",
+        collection_title="五星物语",
+        current_status=ProcessingStatus.WAITING_STABLE,
+    )
+    record_id = db.insert_record(record)
+    collection_calls: list[str] = []
+
+    def fake_collection_llm(
+        collection_title: str,
+        filenames: list[str],
+        *_args: object,
+        **_kwargs: object,
+    ) -> LlmMetadata:
+        collection_calls.append(collection_title)
+        assert filenames == ["vol_02.zip"]
+        return LlmMetadata(
+            title="五星物語",
+            title_tw="五星物語",
+            title_jp="ファイブスター物語",
+            author="永野護",
+            queries_bangumi=["ファイブスター物語", "五星物語", "FSS"],
+            search_titles=["五星物語", "ファイブスター物語", "The Five Star Stories"],
+            confidence=0.9,
+        )
+
+    def fake_volume_llm(*_args: object, **_kwargs: object) -> LlmMetadata:
+        return LlmMetadata(
+            title="ファイブスター物語",
+            title_jp="ファイブスター物語",
+            author="永野護",
+            volume="2",
+            confidence=0.7,
+        )
+
+    def fake_bangumi(*_args: object, **_kwargs: object) -> BangumiMetadata:
+        return BangumiMetadata(
+            subject_id="1772",
+            title="ファイブスター物語",
+            series="ファイブスター物語",
+            volume="2",
+            authors=["永野護"],
+            confidence=0.85,
+        )
+
+    monkeypatch.setattr("manga_pipeline.pipeline.normalize_collection_with_llm", fake_collection_llm)
+    monkeypatch.setattr("manga_pipeline.pipeline.normalize_with_llm", fake_volume_llm)
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bangumi", fake_bangumi)
+    monkeypatch.setattr(
+        "manga_pipeline.pipeline.verify_scrape_with_llm",
+        lambda *_args, **_kwargs: ScrapeVerification(
+            match=True,
+            confidence=0.9,
+            reason="同一作品不同语言标题",
+        ),
+    )
+
+    try:
+        assert _step_parse_metadata(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+        anchor = db.get_series_anchor("五星物语")
+    finally:
+        db.close()
+
+    assert collection_calls == ["五星物语"]
+    assert anchor is not None
+    assert anchor.canonical_series == "五星物語"
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.METADATA_PARSED
+    assert updated.title == "五星物語"
+    assert updated.series == "五星物語"
+    assert updated.volume == "2"
+    assert updated.author == "永野護"
+
+
+def test_larger_same_volume_replaces_existing_generated_artifacts(
+    tmp_path: Path,
+) -> None:
+    paths = PathsConfig(
+        inbox=tmp_path / "inbox",
+        processing=tmp_path / "processing",
+        archive_cbz=tmp_path / "archive_cbz",
+        kepub_ready=tmp_path / "kepub_ready",
+        komga_library=tmp_path / "komga-library",
+        state=tmp_path / "state",
+        manual_review=tmp_path / "manual-review",
+        logs=tmp_path / "logs",
+    )
+    cfg = PipelineConfig(paths=paths)
+    db = Database(tmp_path / "pipeline.db")
+    source = paths.inbox / "vol_01卷.zip"
+    source.parent.mkdir(parents=True)
+    with zipfile.ZipFile(source, "w") as zf:
+        zf.writestr("001.jpg", b"x" * 2048)
+
+    record = MangaRecord(
+        original_path=str(source),
+        file_name=source.name,
+        file_hash="larger-replacement-v1",
+        current_status=ProcessingStatus.METADATA_PARSED,
+        title="異世界歸來的舅舅",
+        series="異世界歸來的舅舅",
+        volume="1",
+    )
+    record_id = db.insert_record(record)
+    clean_name = _build_clean_name(record)
+    target_archive = paths.archive_cbz / f"{clean_name}.cbz"
+    ready_path = paths.kepub_ready / f"{clean_name}.kepub.epub"
+    imported_path = paths.komga_library / record.series / f"{clean_name}.kepub.epub"
+    for path, content in [
+        (target_archive, b"old"),
+        (ready_path, b"old ready"),
+        (ready_path.with_suffix(".jpg"), b"old ready cover"),
+        (imported_path, b"old imported"),
+        (imported_path.with_suffix(".jpg"), b"old imported cover"),
+    ]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    try:
+        assert _step_normalize_and_archive(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.ARCHIVED
+    assert Path(updated.archive_path) == target_archive
+    assert target_archive.is_file()
+    assert not ready_path.exists()
+    assert not ready_path.with_suffix(".jpg").exists()
+    assert not imported_path.exists()
+    assert not imported_path.with_suffix(".jpg").exists()
+
+    backups = list((paths.processing / "replacement-backups").glob("*"))
+    assert len(backups) == 1
+    assert (backups[0] / "archive_cbz" / target_archive.name).read_bytes() == b"old"
+    assert (backups[0] / "kepub_ready" / ready_path.name).read_bytes() == b"old ready"
+    assert (
+        backups[0] / "komga-library" / record.series / imported_path.name
+    ).read_bytes() == b"old imported"
+
+
+def test_same_volume_replacement_rejects_source_that_is_not_larger(
+    tmp_path: Path,
+) -> None:
+    paths = PathsConfig(
+        inbox=tmp_path / "inbox",
+        processing=tmp_path / "processing",
+        archive_cbz=tmp_path / "archive_cbz",
+        kepub_ready=tmp_path / "kepub_ready",
+        komga_library=tmp_path / "komga-library",
+        state=tmp_path / "state",
+        manual_review=tmp_path / "manual-review",
+        logs=tmp_path / "logs",
+    )
+    cfg = PipelineConfig(paths=paths)
+    db = Database(tmp_path / "pipeline.db")
+    source = paths.inbox / "vol_01卷.zip"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"small")
+
+    record = MangaRecord(
+        original_path=str(source),
+        file_name=source.name,
+        file_hash="small-replacement-v1",
+        current_status=ProcessingStatus.METADATA_PARSED,
+        title="異世界歸來的舅舅",
+        series="異世界歸來的舅舅",
+        volume="1",
+    )
+    record_id = db.insert_record(record)
+    target_archive = paths.archive_cbz / f"{_build_clean_name(record)}.cbz"
+    target_archive.parent.mkdir(parents=True)
+    target_archive.write_bytes(b"larger existing archive")
+
+    try:
+        assert _step_normalize_and_archive(record_id, record, cfg, db) is False
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.FAILED
+    assert "source is not larger" in updated.error_message
+    assert target_archive.read_bytes() == b"larger existing archive"
+
+
+def test_llm_enabled_parse_does_not_fallback_to_local_parser(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig(
+        metadata=MetadataConfig(
+            llm_normalize_enabled=True,
+            llm_model="gemini-3.1-flash-lite",
+            bookwalker_tw_enabled=False,
+            bookwalker_jp_enabled=False,
+            bangumi_enabled=True,
+        )
+    )
+    db = Database(tmp_path / "pipeline.db")
+    record = MangaRecord(
+        file_name="[高槁真][最終兵器少女][尖端].Vol.05.zip",
+        file_hash="saikano-v5",
+        collection_title="[高槁真][最終兵器少女][尖端][7全]",
+        current_status=ProcessingStatus.WAITING_STABLE,
+    )
+    record_id = db.insert_record(record)
+
+    def fail_bangumi(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("provider search should not run without LLM parse")
+
+    monkeypatch.setattr("manga_pipeline.pipeline.normalize_with_llm", lambda *_a, **_k: None)
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bangumi", fail_bangumi)
+
+    try:
+        assert _step_parse_metadata(record_id, record, cfg, db) is False
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.NEEDS_REVIEW
+    assert updated.error_message == "LLM filename normalization unavailable"
+
+
+def test_llm_verification_decides_cross_language_provider_match(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig(
+        metadata=MetadataConfig(
+            bookwalker_tw_enabled=False,
+            bookwalker_jp_enabled=False,
+            bangumi_enabled=True,
+            bangumi_min_confidence=0.65,
+            llm_normalize_enabled=True,
+            llm_verify_scrape_enabled=True,
+            llm_model="gemini-3.1-flash-lite",
+            confidence_auto_accept=0.65,
+        )
+    )
+    db = Database(tmp_path / "pipeline.db")
+    record = MangaRecord(
+        file_name="[高槁真][最終兵器少女][尖端].Vol.01.zip",
+        file_hash="saikano-v1",
+        collection_title="[高槁真][最終兵器少女][尖端][7全]",
+        current_status=ProcessingStatus.WAITING_STABLE,
+    )
+    record_id = db.insert_record(record)
+
+    def fake_normalize(*_args: object, **_kwargs: object) -> LlmMetadata:
+        return LlmMetadata(
+            title="最終兵器少女",
+            title_tw="最終兵器少女",
+            title_jp="最終兵器彼女",
+            queries_bangumi=["最終兵器彼女"],
+            author="高橋しん",
+            volume="1",
+            confidence=0.8,
+        )
+
+    def fake_bangumi(*_args: object, **_kwargs: object) -> BangumiMetadata:
+        return BangumiMetadata(
+            subject_id="980",
+            title="最終兵器彼女",
+            series="最終兵器彼女",
+            volume="1",
+            authors=["高橋しん"],
+            publisher="小学館",
+            confidence=0.75,
+        )
+
+    monkeypatch.setattr("manga_pipeline.pipeline.normalize_with_llm", fake_normalize)
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bangumi", fake_bangumi)
+    monkeypatch.setattr(
+        "manga_pipeline.pipeline.verify_scrape_with_llm",
+        lambda *_args, **_kwargs: ScrapeVerification(
+            match=True,
+            confidence=0.9,
+            reason="中文译名与日文原名为同一作品",
+        ),
+    )
+
+    try:
+        assert _step_parse_metadata(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.METADATA_PARSED
+    assert updated.series == "最終兵器彼女"
+    assert updated.volume == "1"
+
+
 def test_bookwalker_jp_second_layer_before_bangumi(
     tmp_path: Path, monkeypatch: object
 ) -> None:
@@ -358,7 +878,7 @@ def test_bookwalker_jp_second_layer_before_bangumi(
     assert updated.source_url == "https://bookwalker.jp/de77397f43-76ca-44f5-aa61-20b09f6600ce/"
 
 
-def test_collection_edition_rejects_bookwalker_false_positive(
+def test_llm_search_result_is_not_overridden_by_collection_edition_parse(
     tmp_path: Path, monkeypatch: object
 ) -> None:
     cfg = PipelineConfig(
@@ -429,10 +949,10 @@ def test_collection_edition_rejects_bookwalker_false_positive(
         db.close()
 
     assert updated is not None
-    assert updated.title == "灌籃高手 完全版"
-    assert updated.series == "灌籃高手 完全版"
+    assert updated.title == "灌籃高手新裝再編版"
+    assert updated.series == "灌籃高手新裝再編版"
     assert updated.volume == "1"
-    assert updated.source_url == "https://bgm.tv/subject/9093"
+    assert updated.source_url == "https://www.bookwalker.com.tw/product/251291"
 
 
 def test_dna2_collection_adds_bookwalker_jp_official_search_title() -> None:
