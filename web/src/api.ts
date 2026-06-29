@@ -129,3 +129,34 @@ export const approveCandidate = (id: number, candidate_index: number) =>
 // LLM Runs
 export const getLlmRuns = (limit = 50) =>
   request<{ items: LlmRun[] }>(`/api/llm-runs?limit=${limit}`);
+
+// Batch operations
+export const batchReset = (ids: number[]) =>
+  request<{ results: Array<{ id: number; ok: boolean; detail?: string; status?: string }> }>(
+    "/api/records/batch-reset",
+    { method: "POST", body: JSON.stringify({ ids }) }
+  );
+
+export const batchForceRescrape = (opts: {
+  ids: number[];
+  provider: string;
+  title?: string;
+  volume?: string;
+  author?: string;
+  relocate?: boolean;
+}) =>
+  request<{ results: RescrapeResult[]; any_changed: boolean }>(
+    "/api/records/batch-force-rescrape",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ids: opts.ids,
+        provider: opts.provider,
+        title: opts.title ?? "",
+        volume: opts.volume ?? "",
+        author: opts.author ?? "",
+        relocate: opts.relocate ?? true,
+      }),
+    }
+  );
+

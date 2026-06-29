@@ -476,8 +476,84 @@ def reset_record(
 
 
 # ---------------------------------------------------------------------------
-# Provider search (standalone, not tied to a record)
+# Batch operations
 # ---------------------------------------------------------------------------
+
+class BatchResetRequest(BaseModel):
+    ids: list[int] = Field(min_length=1)
+
+
+class BatchForceRescrapeRequest(BaseModel):
+    ids: list[int] = Field(min_length=1)
+    provider: str = "bookwalker_tw"
+    title: str = ""          # If empty, each record's own series/title is used
+    volume: str = ""         # If empty, each record's own volume is used
+    author: str = ""
+    relocate: bool = True
+
+
+@app.post("/api/records/batch-reset")
+def batch_reset(
+    request: BatchResetRequest,
+    _user: dict[str, Any] = Depends(require_user),
+    cfg: PipelineConfig = Depends(get_cfg),
+) -> dict[str, Any]:
+    """Reset multiple records to DISCOVERED in a single call."""
+    db = Database(cfg.paths.state / "pipeline.db")
+    results: list[dict[str, Any]] = []
+    try:
+        for record_id in request.ids:
+            record = db.get_record_by_id(record_id)
+            if record is None:
+                results.append({"id": record_id, "ok": False, "detail": "不存在"})
+                continue
+            db.update_status(record_id, ProcessingStatus.DISCOVERED, error_message="")
+            results.append({"id": record_id, "ok": True, "status": ProcessingStatus.DISCOVERED})
+        return {"results": results}
+    finally:
+        db.close()
+
+
+@app.post("/api/records/batch-force-rescrape")
+def batch_force_rescrape(
+    request: BatchForceRescrapeRequest,
+    _user: dict[str, Any] = Depends(require_user),
+    cfg: PipelineConfig = Depends(get_cfg),
+) -> dict[str, Any]:
+    """Force-rescrape multiple records with the same provider, bypassing all automatic filters.
+
+    If *title* is empty, each record's current series/title is used as the search term.
+    This mirrors the single-record force path so the user's explicit choice is final.
+    """
+    db = Database(cfg.paths.state / "pipeline.db")
+    results: list[dict[str, Any]] = []
+    any_changed = False
+    try:
+        for record_id in request.ids:
+            record = db.get_record_by_id(record_id)
+            if record is None:
+                results.append({"id": record_id, "status": "error", "message": "记录不存在"})
+                continue
+            search_title = request.title or record.series or record.title or record.file_name
+            result = force_rescrape_record(
+                record,
+                cfg,
+                db,
+                provider=request.provider,
+                search_title=search_title,
+                volume=request.volume or record.volume,
+                author=request.author or record.author,
+                dry_run=False,
+                relocate=request.relocate,
+            )
+            if result.status == "updated":
+                any_changed = True
+            results.append(result.__dict__)
+        return {"results": results, "any_changed": any_changed}
+    finally:
+        db.close()
+
+
 
 @app.post("/api/search")
 def search_provider(
