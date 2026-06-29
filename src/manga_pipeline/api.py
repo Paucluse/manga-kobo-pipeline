@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import sqlite3
+import shutil
 from collections.abc import Generator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
+from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -23,11 +25,13 @@ from manga_pipeline.control import (
 )
 from manga_pipeline.database import Database
 from manga_pipeline.filename_parser import ParseResult
+from manga_pipeline.logging_config import get_logger
 from manga_pipeline.models import ProcessingStatus
-from manga_pipeline.pipeline import _apply_review_candidate, _candidate_record_fields
+from manga_pipeline.pipeline import _apply_review_candidate, _candidate_record_fields, process_all_pending
 from manga_pipeline.rescrape import force_rescrape_record, rescrape_records, select_records
 
 SESSION_COOKIE = "pipeline_session"
+logger = get_logger(__name__)
 
 app = FastAPI(title="Manga Pipeline Control API")
 app.add_middleware(
@@ -460,19 +464,132 @@ def reimport_record(
 @app.post("/api/records/{record_id}/reset")
 def reset_record(
     record_id: int,
+    background_tasks: BackgroundTasks,
     _user: dict[str, Any] = Depends(require_user),
     cfg: PipelineConfig = Depends(get_cfg),
 ) -> dict[str, Any]:
-    """Reset a failed/stuck record back to DISCOVERED so the pipeline retries from scratch."""
+    """Reset an inbox-backed record so the full automatic pipeline reruns."""
     db = Database(cfg.paths.state / "pipeline.db")
     try:
         record = db.get_record_by_id(record_id)
         if record is None:
             raise HTTPException(status_code=404, detail="记录不存在")
-        db.update_status(record_id, ProcessingStatus.DISCOVERED, error_message="")
-        return {"ok": True, "status": ProcessingStatus.DISCOVERED}
+        result = _reset_inbox_record(record_id, record, cfg, db)
+        if not result["ok"]:
+            raise HTTPException(status_code=400, detail=result["detail"])
+        background_tasks.add_task(_process_pending_background, cfg)
+        result["processing_started"] = True
+        return result
     finally:
         db.close()
+
+
+def _reset_inbox_record(
+    record_id: int,
+    record: Any,
+    cfg: PipelineConfig,
+    db: Database,
+) -> dict[str, Any]:
+    source_path = Path(record.original_path)
+    if not source_path.exists():
+        return {
+            "id": record_id,
+            "ok": False,
+            "detail": "源文件已不在 inbox 中，无法从头重跑；请使用重新刮削/重新导入功能",
+        }
+    if not _is_relative_to(source_path, cfg.paths.inbox):
+        return {
+            "id": record_id,
+            "ok": False,
+            "detail": "源文件不在 inbox 中，无法作为新导入任务重置",
+        }
+
+    moved_artifacts = _backup_reset_artifacts(record, cfg)
+    db.update_status(
+        record_id,
+        ProcessingStatus.WAITING_STABLE,
+        error_message="",
+        title="",
+        author="",
+        series="",
+        volume="",
+        publisher="",
+        summary="",
+        cover_url="",
+        source_url="",
+        isbn="",
+        page_count="",
+        confidence="0",
+        archive_path="",
+        converted_path="",
+        library_book_id="",
+        retry_count=0,
+    )
+    return {
+        "id": record_id,
+        "ok": True,
+        "status": ProcessingStatus.WAITING_STABLE,
+        "moved_artifacts": moved_artifacts,
+    }
+
+
+def _process_pending_background(cfg: PipelineConfig) -> None:
+    db = Database(cfg.paths.state / "pipeline.db")
+    try:
+        process_all_pending(cfg, db)
+    except Exception:
+        logger.exception("Failed to process pending records after reset")
+    finally:
+        db.close()
+
+
+def _backup_reset_artifacts(record: Any, cfg: PipelineConfig) -> int:
+    candidates = _reset_artifact_candidates(record)
+    existing = [path for path in candidates if path.is_file()]
+    if not existing:
+        return 0
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = cfg.paths.processing / "reset-backups" / f"{timestamp}-id{record.id}"
+    moved = 0
+    for artifact in existing:
+        destination = backup_dir / _artifact_relative_path(artifact, cfg)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(artifact), str(destination))
+        moved += 1
+    return moved
+
+
+def _reset_artifact_candidates(record: Any) -> list[Path]:
+    candidates: list[Path] = []
+    for raw_path in (record.archive_path, record.converted_path):
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        candidates.append(path)
+        candidates.append(path.with_suffix(".jpg"))
+    return list(dict.fromkeys(candidates))
+
+
+def _artifact_relative_path(path: Path, cfg: PipelineConfig) -> Path:
+    for root_name, root in (
+        ("archive_cbz", cfg.paths.archive_cbz),
+        ("kepub_ready", cfg.paths.kepub_ready),
+        ("komga-library", cfg.paths.komga_library),
+    ):
+        try:
+            return Path(root_name) / path.relative_to(root)
+        except ValueError:
+            continue
+    return Path("other") / path.name
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -495,21 +612,26 @@ class BatchForceRescrapeRequest(BaseModel):
 @app.post("/api/records/batch-reset")
 def batch_reset(
     request: BatchResetRequest,
+    background_tasks: BackgroundTasks,
     _user: dict[str, Any] = Depends(require_user),
     cfg: PipelineConfig = Depends(get_cfg),
 ) -> dict[str, Any]:
-    """Reset multiple records to DISCOVERED in a single call."""
+    """Reset multiple inbox-backed records so the automatic pipeline reruns."""
     db = Database(cfg.paths.state / "pipeline.db")
     results: list[dict[str, Any]] = []
+    any_reset = False
     try:
         for record_id in request.ids:
             record = db.get_record_by_id(record_id)
             if record is None:
                 results.append({"id": record_id, "ok": False, "detail": "不存在"})
                 continue
-            db.update_status(record_id, ProcessingStatus.DISCOVERED, error_message="")
-            results.append({"id": record_id, "ok": True, "status": ProcessingStatus.DISCOVERED})
-        return {"results": results}
+            result = _reset_inbox_record(record_id, record, cfg, db)
+            any_reset = any_reset or bool(result["ok"])
+            results.append(result)
+        if any_reset:
+            background_tasks.add_task(_process_pending_background, cfg)
+        return {"results": results, "processing_started": any_reset}
     finally:
         db.close()
 

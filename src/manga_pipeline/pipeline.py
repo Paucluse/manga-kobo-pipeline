@@ -110,6 +110,7 @@ def _process_all_pending_locked(cfg: PipelineConfig, db: Database) -> int:
 
     # Process each stage in order
     for status_to_process in [
+        ProcessingStatus.DISCOVERED,
         ProcessingStatus.WAITING_STABLE,
         ProcessingStatus.NORMALIZED,
         ProcessingStatus.METADATA_PARSED,
@@ -309,6 +310,19 @@ def _advance_record(
     assert record_id is not None
 
     status = record.current_status
+
+    if status == ProcessingStatus.DISCOVERED:
+        source_path = Path(record.original_path)
+        if not record.original_path or not source_path.exists():
+            db.update_status(
+                record_id,
+                ProcessingStatus.FAILED,
+                error_message="Source file missing after pipeline reset",
+            )
+            return False
+        db.update_status(record_id, ProcessingStatus.WAITING_STABLE)
+        record.current_status = ProcessingStatus.WAITING_STABLE
+        return _step_parse_metadata(record_id, record, cfg, db)
 
     if status == ProcessingStatus.WAITING_STABLE:
         return _step_parse_metadata(record_id, record, cfg, db)
@@ -1064,6 +1078,7 @@ def _step_parse_metadata(
 ) -> bool:
     """Parse filename metadata."""
     parsed = ParseResult()
+    source_volume = _explicit_collection_child_volume(record)
     control = ControlStore(db.db_path.parent)
     llm_run_id: int | None = None
     series_anchor, _anchor_metadata = _get_or_create_series_anchor(
@@ -1159,7 +1174,7 @@ def _step_parse_metadata(
         parsed.series = llm_metadata.title
         parsed.author = llm_metadata.author
         parsed.publisher = llm_metadata.publisher
-        parsed.volume = llm_metadata.volume
+        parsed.volume = source_volume or llm_metadata.volume
         parsed.confidence = llm_metadata.confidence
         _apply_series_anchor(parsed, series_anchor)
     elif cfg.metadata.llm_normalize_enabled:
@@ -1178,6 +1193,8 @@ def _step_parse_metadata(
         parsed = parse_filename(record.file_name)
         if record.collection_title:
             _apply_collection_title(parsed, record.collection_title)
+        if source_volume:
+            parsed.volume = source_volume
         _apply_series_anchor(parsed, series_anchor)
 
     mode = control.get_mode()
@@ -1192,6 +1209,8 @@ def _step_parse_metadata(
             selected = _select_policy_candidate(candidates, policy)
             if selected is not None:
                 _apply_review_candidate(parsed, selected)
+                if source_volume:
+                    parsed.volume = source_volume
                 _apply_series_anchor(parsed, series_anchor)
                 db.update_status(
                     record_id,
@@ -1210,7 +1229,7 @@ def _step_parse_metadata(
                 "series": parsed.series,
                 "author": parsed.author,
                 "publisher": parsed.publisher,
-                "volume": parsed.volume,
+                "volume": source_volume or parsed.volume,
                 "confidence": parsed.confidence,
                 "llm_run_id": llm_run_id,
             },
@@ -1341,6 +1360,8 @@ def _step_parse_metadata(
 
     # Update record with parsed metadata
     parsed.series = _canonical_series_name(parsed.series or parsed.title)
+    if source_volume:
+        parsed.volume = source_volume
     _apply_series_anchor(parsed, series_anchor)
     db.update_status(
         record_id,
@@ -1358,6 +1379,38 @@ def _step_parse_metadata(
         confidence=str(parsed.confidence),
     )
     return True
+
+
+def _explicit_collection_child_volume(record: MangaRecord) -> str:
+    """Return a structural volume from a direct collection child name.
+
+    For inbox layouts like ``Series/1/`` or ``Series/Vol_02.zip``, the child
+    item name is a stronger signal than LLM or provider metadata. Keep this
+    deliberately narrow so title digits such as ``DNA2`` are not treated as
+    volume numbers.
+    """
+    if not record.collection_title or not record.file_name:
+        return ""
+
+    name = _strip_known_book_suffix(record.file_name).strip()
+    patterns = (
+        r"^0*(\d{1,3})$",
+        r"^(?:v|vol)[._\-\s]*0*(\d{1,3})$",
+        r"^第0*(\d{1,3})[卷巻]$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, name, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _strip_known_book_suffix(value: str) -> str:
+    lower = value.lower()
+    for suffix in sorted(SUPPORTED_EXTENSIONS, key=len, reverse=True):
+        if lower.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
 
 
 def _select_policy_candidate(

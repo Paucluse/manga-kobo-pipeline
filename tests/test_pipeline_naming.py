@@ -12,6 +12,7 @@ from manga_pipeline.llm_metadata import LlmMetadata, ScrapeVerification
 from manga_pipeline.models import MangaRecord, ProcessingStatus
 from manga_pipeline.pipeline import (
     _apply_collection_title,
+    _advance_record,
     _build_book_title,
     _build_clean_name,
     _build_series_name,
@@ -586,6 +587,122 @@ def test_collection_series_anchor_overrides_per_volume_scrape_series(
     assert updated.series == "五星物語"
     assert updated.volume == "2"
     assert updated.author == "永野護"
+
+
+def test_numeric_collection_child_directory_volume_overrides_llm_and_scrape(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig(
+        paths=PathsConfig(komga_library=tmp_path / "komga-library"),
+        metadata=MetadataConfig(
+            bookwalker_tw_enabled=False,
+            bookwalker_jp_enabled=False,
+            bangumi_enabled=True,
+            bangumi_min_confidence=0.65,
+            llm_normalize_enabled=True,
+            llm_verify_scrape_enabled=False,
+            llm_model="gemini-3.1-flash-lite",
+            confidence_auto_accept=0.65,
+        ),
+    )
+    db = Database(tmp_path / "pipeline.db")
+    source_dir = tmp_path / "inbox" / "草莓100%" / "2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "001.jpg").write_bytes(b"page")
+    record = MangaRecord(
+        original_path=str(source_dir),
+        file_name=source_dir.name,
+        file_hash="ichigo-v2",
+        collection_title="草莓100%",
+        current_status=ProcessingStatus.WAITING_STABLE,
+    )
+    record_id = db.insert_record(record)
+
+    def fake_collection_llm(*_args: object, **_kwargs: object) -> LlmMetadata:
+        return LlmMetadata(
+            title="草莓100%",
+            title_tw="草莓100%",
+            title_jp="いちご100%",
+            queries_bangumi=["いちご100%", "草莓100%"],
+            confidence=0.9,
+        )
+
+    def fake_volume_llm(*_args: object, **_kwargs: object) -> LlmMetadata:
+        return LlmMetadata(
+            title="草莓100%",
+            title_jp="いちご100%",
+            volume="7",
+            confidence=0.8,
+        )
+
+    def fake_bangumi(*_args: object, **_kwargs: object) -> BangumiMetadata:
+        return BangumiMetadata(
+            subject_id="1234",
+            title="いちご100%",
+            series="いちご100%",
+            volume="11",
+            authors=["河下水希"],
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr("manga_pipeline.pipeline.normalize_collection_with_llm", fake_collection_llm)
+    monkeypatch.setattr("manga_pipeline.pipeline.normalize_with_llm", fake_volume_llm)
+    monkeypatch.setattr("manga_pipeline.pipeline.search_bangumi", fake_bangumi)
+
+    try:
+        assert _step_parse_metadata(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.METADATA_PARSED
+    assert updated.series == "草莓100%"
+    assert updated.volume == "2"
+
+
+def test_discovered_record_advances_to_parse_stage(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cfg = PipelineConfig()
+    db = Database(tmp_path / "pipeline.db")
+    source = tmp_path / "inbox" / "草莓100%" / "1"
+    source.mkdir(parents=True)
+    (source / "001.jpg").write_bytes(b"page")
+    record = MangaRecord(
+        original_path=str(source),
+        file_name="1",
+        file_hash="ichigo-v1",
+        collection_title="草莓100%",
+        current_status=ProcessingStatus.DISCOVERED,
+    )
+    record_id = db.insert_record(record)
+    record.id = record_id
+    seen: dict[str, object] = {}
+
+    def fake_parse(
+        parsed_record_id: int,
+        parsed_record: MangaRecord,
+        *_args: object,
+    ) -> bool:
+        seen["record_id"] = parsed_record_id
+        seen["status"] = parsed_record.current_status
+        return True
+
+    monkeypatch.setattr("manga_pipeline.pipeline._step_parse_metadata", fake_parse)
+
+    try:
+        assert _advance_record(record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert seen == {
+        "record_id": record_id,
+        "status": ProcessingStatus.WAITING_STABLE,
+    }
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.WAITING_STABLE
 
 
 def test_larger_same_volume_replaces_existing_generated_artifacts(
