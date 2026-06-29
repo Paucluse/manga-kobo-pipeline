@@ -63,11 +63,6 @@ export const setMode = (mode: string) =>
     method: "PUT",
     body: JSON.stringify({ mode }),
   });
-export const setPrompt = (content: string) =>
-  request<{ id: number; prompt: string }>("/api/settings/prompt", {
-    method: "PUT",
-    body: JSON.stringify({ content }),
-  });
 
 // Records
 export const getRecords = (params: {
@@ -134,17 +129,3 @@ export const approveCandidate = (id: number, candidate_index: number) =>
 // LLM Runs
 export const getLlmRuns = (limit = 50) =>
   request<{ items: LlmRun[] }>(`/api/llm-runs?limit=${limit}`);
-
-// Batch rescrape
-export const batchRescrape = (opts: {
-  ids?: number[];
-  title?: string;
-  dry_run?: boolean;
-  relocate?: boolean;
-  all_records?: boolean;
-  include_unfinished?: boolean;
-}) =>
-  request<{ items: RescrapeResult[] }>("/api/rescrape", {
-    method: "POST",
-    body: JSON.stringify(opts),
-  });
