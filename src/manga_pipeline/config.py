@@ -34,6 +34,7 @@ class KoboConfig(BaseModel):
     format: str = "KEPUB"
     manga_style: bool = True
     high_quality: bool = True
+    skip_kcc: bool = False  # When True, skip KCC conversion and import CBZ directly
 
 
 class PdfConfig(BaseModel):
@@ -180,3 +181,79 @@ def load_config(config_path: Path | None = None) -> PipelineConfig:
 def get_config_path() -> Path | None:
     """Return the path to the config file that would be loaded, or None."""
     return _find_config_path()
+
+
+# ---------------------------------------------------------------------------
+# Allowed configuration keys that can be overridden at runtime via the web UI.
+# Maps dotted key name -> (section, field, python type).
+# ---------------------------------------------------------------------------
+
+_ALLOWED_OVERRIDES: dict[str, tuple[str, str, type]] = {
+    # KCC / Kobo
+    "kobo.profile": ("kobo", "profile", str),
+    "kobo.format": ("kobo", "format", str),
+    "kobo.manga_style": ("kobo", "manga_style", bool),
+    "kobo.high_quality": ("kobo", "high_quality", bool),
+    "kobo.skip_kcc": ("kobo", "skip_kcc", bool),
+    # Processing
+    "processing.stable_check_seconds": ("processing", "stable_check_seconds", int),
+    "processing.delete_inbox_after_archive": ("processing", "delete_inbox_after_archive", bool),
+    "processing.cleanup_after_import": ("processing", "cleanup_after_import", bool),
+    "processing.max_retries": ("processing", "max_retries", int),
+    # Metadata / scrape sources
+    "metadata.confidence_auto_accept": ("metadata", "confidence_auto_accept", float),
+    "metadata.bookwalker_tw_enabled": ("metadata", "bookwalker_tw_enabled", bool),
+    "metadata.bookwalker_jp_enabled": ("metadata", "bookwalker_jp_enabled", bool),
+    "metadata.bangumi_enabled": ("metadata", "bangumi_enabled", bool),
+    "metadata.llm_normalize_enabled": ("metadata", "llm_normalize_enabled", bool),
+    "metadata.llm_verify_scrape_enabled": ("metadata", "llm_verify_scrape_enabled", bool),
+    # PDF
+    "pdf.enabled": ("pdf", "enabled", bool),
+    "pdf.dpi": ("pdf", "dpi", int),
+    "pdf.jpeg_quality": ("pdf", "jpeg_quality", int),
+}
+
+
+def _coerce(value: str, target_type: type) -> Any:
+    """Coerce a string value from the DB to the target Python type."""
+    if target_type is bool:
+        return value.lower() in ("true", "1", "yes")
+    if target_type is int:
+        return int(value)
+    if target_type is float:
+        return float(value)
+    return value
+
+
+def apply_runtime_overrides(
+    cfg: PipelineConfig,
+    overrides: dict[str, str],
+) -> PipelineConfig:
+    """Return a *new* PipelineConfig with runtime overrides applied.
+
+    Only keys listed in ``_ALLOWED_OVERRIDES`` are accepted; unknown keys are
+    silently ignored.  The original ``cfg`` is not mutated.
+    """
+    patches: dict[str, dict[str, Any]] = {}  # section -> {field: value}
+    for key, raw_value in overrides.items():
+        spec = _ALLOWED_OVERRIDES.get(key)
+        if spec is None:
+            continue
+        section, field, target_type = spec
+        try:
+            patches.setdefault(section, {})[field] = _coerce(raw_value, target_type)
+        except (ValueError, TypeError):
+            continue  # skip bad values
+
+    if not patches:
+        return cfg
+
+    data = cfg.model_dump()
+    for section, fields in patches.items():
+        data.setdefault(section, {}).update(fields)
+    return PipelineConfig.model_validate(data)
+
+
+def get_allowed_override_keys() -> list[str]:
+    """Return the list of config keys that can be overridden via the web UI."""
+    return sorted(_ALLOWED_OVERRIDES.keys())

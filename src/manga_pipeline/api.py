@@ -16,7 +16,12 @@ from pydantic import BaseModel, Field
 from manga_pipeline.bangumi import search_bangumi
 from manga_pipeline.bookwalker_jp import search_bookwalker_jp
 from manga_pipeline.bookwalker_tw import search_bookwalker_tw
-from manga_pipeline.config import PipelineConfig, load_config
+from manga_pipeline.config import (
+    PipelineConfig,
+    apply_runtime_overrides,
+    get_allowed_override_keys,
+    load_config,
+)
 from manga_pipeline.control import (
     VALID_MODES,
     ControlStore,
@@ -708,6 +713,85 @@ def llm_runs(
     store: ControlStore = Depends(get_store),
 ) -> dict[str, Any]:
     return {"items": store.list_llm_runs(limit=limit)}
+
+
+# ---------------------------------------------------------------------------
+# Pipeline configuration (runtime overrides)
+# ---------------------------------------------------------------------------
+
+_SENSITIVE_FIELDS = {"password", "api_key", "llm_api_key_file", "llm_api_key_env"}
+
+
+def _sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Remove sensitive fields from a config dict before sending to the client."""
+    out: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            out[key] = _sanitize_config(value)
+        elif any(s in key for s in _SENSITIVE_FIELDS):
+            out[key] = "********"
+        else:
+            out[key] = value
+    return out
+
+
+@app.get("/api/pipeline-config")
+def get_pipeline_config(
+    _user: dict[str, Any] = Depends(require_user),
+    cfg: PipelineConfig = Depends(get_cfg),
+    store: ControlStore = Depends(get_store),
+) -> dict[str, Any]:
+    """Return current effective config (base + runtime overrides), with sensitive fields redacted."""
+    overrides = store.get_all_pipeline_settings()
+    merged = apply_runtime_overrides(cfg, overrides)
+    full = merged.model_dump()
+    # Convert Path objects to strings for JSON serialization
+    for section in full.values():
+        if isinstance(section, dict):
+            for k, v in list(section.items()):
+                if hasattr(v, '__fspath__'):
+                    section[k] = str(v)
+    sanitized = _sanitize_config(full)
+    # Also attach which keys have active overrides
+    sanitized["_overrides"] = {k: v for k, v in overrides.items() if k in {ok for ok in get_allowed_override_keys()}}
+    sanitized["_allowed_keys"] = get_allowed_override_keys()
+    return sanitized
+
+
+class PipelineConfigPatch(BaseModel):
+    overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.patch("/api/pipeline-config")
+def patch_pipeline_config(
+    request: PipelineConfigPatch,
+    _user: dict[str, Any] = Depends(require_user),
+    store: ControlStore = Depends(get_store),
+) -> dict[str, Any]:
+    """Set one or more runtime config overrides."""
+    allowed = set(get_allowed_override_keys())
+    applied = {}
+    rejected = []
+    for key, value in request.overrides.items():
+        if key not in allowed:
+            rejected.append(key)
+            continue
+        store.set_setting(key, str(value))
+        applied[key] = str(value)
+    return {"applied": applied, "rejected": rejected}
+
+
+@app.delete("/api/pipeline-config/{key:path}")
+def delete_pipeline_config(
+    key: str,
+    _user: dict[str, Any] = Depends(require_user),
+    store: ControlStore = Depends(get_store),
+) -> dict[str, Any]:
+    """Delete a runtime override, reverting to config.yaml default."""
+    found = store.delete_pipeline_setting(key)
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Override not found: {key}")
+    return {"ok": True, "key": key}
 
 
 # ---------------------------------------------------------------------------

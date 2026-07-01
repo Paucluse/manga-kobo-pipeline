@@ -331,6 +331,8 @@ def _advance_record(
         return _step_normalize_and_archive(record_id, record, cfg, db)
 
     if status == ProcessingStatus.ARCHIVED:
+        if cfg.kobo.skip_kcc:
+            return _step_skip_kcc(record_id, record, cfg, db)
         return _step_convert_kcc(record_id, record, cfg, db)
 
     if status == ProcessingStatus.CONVERTED:
@@ -1674,6 +1676,39 @@ def _move_replacement_artifact(
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(artifact), str(destination))
     return destination
+
+
+def _step_skip_kcc(
+    record_id: int,
+    record: MangaRecord,
+    cfg: PipelineConfig,
+    db: Database,
+) -> bool:
+    """Skip KCC conversion — use the archived CBZ directly as the import source.
+
+    When the user disables KCC via the web settings, the CBZ archive is treated
+    as the final converted file and handed straight to the Komga import step.
+    """
+    archive_path = Path(record.archive_path)
+    if not archive_path.is_file():
+        db.update_status(
+            record_id,
+            ProcessingStatus.FAILED,
+            error_message=f"Archive missing (skip-KCC mode): {archive_path}",
+        )
+        return False
+
+    db.update_status(
+        record_id,
+        ProcessingStatus.CONVERTED,
+        converted_path=str(archive_path),
+    )
+    logger.info(
+        "[ID:%s] KCC skipped by user config — using CBZ directly: %s",
+        record_id,
+        archive_path.name,
+    )
+    return True
 
 
 def _step_convert_kcc(

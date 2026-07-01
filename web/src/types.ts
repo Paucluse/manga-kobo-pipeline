@@ -148,3 +148,38 @@ export interface MetadataPatch {
   cover_url?: string;
   isbn?: string;
 }
+
+export interface PipelineConfigResponse {
+  kobo: {
+    profile: string;
+    format: string;
+    manga_style: boolean;
+    high_quality: boolean;
+    skip_kcc: boolean;
+  };
+  processing: {
+    stable_check_seconds: number;
+    stable_check_interval: number;
+    delete_inbox_after_archive: boolean;
+    cleanup_after_import: boolean;
+    max_retries: number;
+  };
+  metadata: {
+    confidence_auto_accept: number;
+    bookwalker_tw_enabled: boolean;
+    bookwalker_jp_enabled: boolean;
+    bangumi_enabled: boolean;
+    llm_normalize_enabled: boolean;
+    llm_verify_scrape_enabled: boolean;
+    [key: string]: unknown;
+  };
+  pdf: {
+    enabled: boolean;
+    dpi: number;
+    jpeg_quality: number;
+    [key: string]: unknown;
+  };
+  _overrides: Record<string, string>;
+  _allowed_keys: string[];
+  [key: string]: unknown;
+}

@@ -233,6 +233,21 @@ class ControlStore:
         )
         self.conn.commit()
 
+    def get_all_pipeline_settings(self) -> dict[str, str]:
+        """Return all pipeline_settings rows as {key: value}."""
+        rows = self.conn.execute(
+            "SELECT key, value FROM pipeline_settings"
+        ).fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
+    def delete_pipeline_setting(self, key: str) -> bool:
+        """Delete a runtime override, returning True if it existed."""
+        cursor = self.conn.execute(
+            "DELETE FROM pipeline_settings WHERE key = ?", (key,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     def get_mode(self) -> str:
         mode = self.get_setting("control_mode") or MODE_AUTO
         return mode if mode in VALID_MODES else MODE_AUTO

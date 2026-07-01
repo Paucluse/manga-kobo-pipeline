@@ -6,6 +6,7 @@ import type {
   LlmRun,
   MangaRecord,
   MetadataPatch,
+  PipelineConfigResponse,
   RecordListResponse,
   RescrapeResult,
   Settings,
@@ -160,3 +161,17 @@ export const batchForceRescrape = (opts: {
     }
   );
 
+// Pipeline configuration
+export const getPipelineConfig = () =>
+  request<PipelineConfigResponse>("/api/pipeline-config");
+
+export const patchPipelineConfig = (overrides: Record<string, unknown>) =>
+  request<{ applied: Record<string, string>; rejected: string[] }>("/api/pipeline-config", {
+    method: "PATCH",
+    body: JSON.stringify({ overrides }),
+  });
+
+export const resetPipelineConfig = (key: string) =>
+  request<{ ok: boolean; key: string }>(`/api/pipeline-config/${key}`, {
+    method: "DELETE",
+  });
