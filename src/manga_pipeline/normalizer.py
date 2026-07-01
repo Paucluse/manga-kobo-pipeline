@@ -10,6 +10,7 @@ Handles normalization of different archive formats:
 
 from __future__ import annotations
 
+import contextlib
 import html
 import posixpath
 import re
@@ -118,25 +119,105 @@ def _repack_rar_to_cbz(
     rar_path: Path, output_path: Path
 ) -> Path:
     """Repack RAR/CBR archive as CBZ."""
+    logger.info("Repacking RAR -> CBZ: %s", rar_path.name)
+
+    errors: list[str] = []
+    for tool in ("unar", "7z"):
+        if shutil.which(tool):
+            try:
+                return _repack_rar_with_external_tool(rar_path, output_path, tool)
+            except ValueError as e:
+                errors.append(str(e))
+
     try:
         import rarfile
     except ImportError as e:
         msg = "rarfile package required for RAR support"
         raise ImportError(msg) from e
 
-    logger.info("Repacking RAR -> CBZ: %s", rar_path.name)
-
-    with (
-        rarfile.RarFile(str(rar_path)) as rf,
-        zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf,
-    ):
-        for entry in rf.infolist():
-            if not entry.is_dir():
-                data = rf.read(entry.filename)
-                zf.writestr(entry.filename, data)
+    try:
+        with (
+            rarfile.RarFile(str(rar_path)) as rf,
+            zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf,
+        ):
+            for entry in rf.infolist():
+                if not entry.is_dir():
+                    data = rf.read(entry.filename)
+                    zf.writestr(entry.filename, data)
+    except rarfile.Error as e:
+        _remove_partial_output(output_path)
+        errors.append(f"rarfile failed: {e}")
+        msg = "RAR extraction failed"
+        if errors:
+            msg = f"{msg}: {'; '.join(errors)}"
+        raise ValueError(msg) from e
 
     logger.info("Repacked to: %s", output_path.name)
     return output_path
+
+
+def _repack_rar_with_external_tool(
+    rar_path: Path,
+    output_path: Path,
+    tool: str,
+) -> Path:
+    with tempfile.TemporaryDirectory(prefix="rar-extract-") as tmp:
+        extract_dir = Path(tmp)
+        if tool == "unar":
+            command = [
+                tool,
+                "-quiet",
+                "-force-overwrite",
+                "-output-directory",
+                str(extract_dir),
+                str(rar_path),
+            ]
+        elif tool == "7z":
+            command = [tool, "x", "-y", f"-o{extract_dir}", str(rar_path)]
+        else:
+            msg = f"Unsupported RAR extraction tool: {tool}"
+            raise ValueError(msg)
+
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            detail = _short_process_output(result)
+            msg = f"{tool} failed"
+            if detail:
+                msg = f"{msg}: {detail}"
+            raise ValueError(msg)
+
+        try:
+            _pack_extracted_tree_to_cbz(extract_dir, output_path)
+        except ValueError:
+            _remove_partial_output(output_path)
+            raise
+
+    logger.info("Repacked to: %s", output_path.name)
+    return output_path
+
+
+def _remove_partial_output(output_path: Path) -> None:
+    with contextlib.suppress(OSError):
+        output_path.unlink()
+
+
+def _pack_extracted_tree_to_cbz(extract_dir: Path, output_path: Path) -> None:
+    files = sorted(path for path in extract_dir.rglob("*") if path.is_file())
+    if not files:
+        msg = "RAR extraction produced no files"
+        raise ValueError(msg)
+
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file_path in files:
+            zf.write(file_path, file_path.relative_to(extract_dir).as_posix())
+
+
+def _short_process_output(result: subprocess.CompletedProcess[str]) -> str:
+    text = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "; ".join(lines[-6:])[:800]
 
 
 def _repack_7z_to_cbz(

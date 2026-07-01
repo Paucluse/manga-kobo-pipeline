@@ -805,6 +805,22 @@ def test_same_volume_replacement_rejects_source_that_is_not_larger(
     target_archive = paths.archive_cbz / f"{_build_clean_name(record)}.cbz"
     target_archive.parent.mkdir(parents=True)
     target_archive.write_bytes(b"larger existing archive")
+    imported_path = paths.komga_library / record.series / f"{_build_clean_name(record)}.kepub.epub"
+    imported_path.parent.mkdir(parents=True)
+    imported_path.write_bytes(b"already imported")
+    db.insert_record(
+        MangaRecord(
+            original_path=str(paths.inbox / "old.zip"),
+            file_name="old.zip",
+            file_hash="small-replacement-imported-owner",
+            current_status=ProcessingStatus.DONE,
+            title=record.title,
+            series=record.series,
+            volume=record.volume,
+            archive_path=str(target_archive),
+            converted_path=str(imported_path),
+        )
+    )
 
     try:
         assert _step_normalize_and_archive(record_id, record, cfg, db) is False
@@ -816,6 +832,71 @@ def test_same_volume_replacement_rejects_source_that_is_not_larger(
     assert updated.current_status == ProcessingStatus.FAILED
     assert "source is not larger" in updated.error_message
     assert target_archive.read_bytes() == b"larger existing archive"
+
+
+def test_stale_archive_from_failed_record_does_not_block_reset_import(
+    tmp_path: Path,
+) -> None:
+    paths = PathsConfig(
+        inbox=tmp_path / "inbox",
+        processing=tmp_path / "processing",
+        archive_cbz=tmp_path / "archive_cbz",
+        kepub_ready=tmp_path / "kepub_ready",
+        komga_library=tmp_path / "komga-library",
+        state=tmp_path / "state",
+        manual_review=tmp_path / "manual-review",
+        logs=tmp_path / "logs",
+    )
+    cfg = PipelineConfig(paths=paths)
+    db = Database(tmp_path / "pipeline.db")
+    source = paths.inbox / "Vol.01"
+    source.mkdir(parents=True)
+    (source / "001.jpg").write_bytes(b"page")
+
+    record = MangaRecord(
+        original_path=str(source),
+        file_name=source.name,
+        file_hash="stale-archive-rerun-v1",
+        current_status=ProcessingStatus.METADATA_PARSED,
+        title="Baka Test",
+        series="Baka Test",
+        volume="1",
+    )
+    record_id = db.insert_record(record)
+    target_archive = paths.archive_cbz / f"{_build_clean_name(record)}.cbz"
+    target_archive.parent.mkdir(parents=True)
+    target_archive.write_bytes(b"stale failed archive")
+    db.insert_record(
+        MangaRecord(
+            original_path=str(paths.inbox / "old.rar"),
+            file_name="old.rar",
+            file_hash="stale-archive-failed-owner",
+            current_status=ProcessingStatus.FAILED,
+            title=record.title,
+            series=record.series,
+            volume=record.volume,
+            error_message="Normalization failed",
+        )
+    )
+
+    try:
+        assert _step_normalize_and_archive(record_id, record, cfg, db) is True
+        updated = db.get_record_by_id(record_id)
+    finally:
+        db.close()
+
+    assert updated is not None
+    assert updated.current_status == ProcessingStatus.ARCHIVED
+    assert Path(updated.archive_path) == target_archive
+    with zipfile.ZipFile(target_archive) as zf:
+        assert "001.jpg" in zf.namelist()
+        assert zf.read("001.jpg") == b"page"
+
+    backups = list((paths.processing / "replacement-backups").glob("*"))
+    assert len(backups) == 1
+    assert (backups[0] / "archive_cbz" / target_archive.name).read_bytes() == (
+        b"stale failed archive"
+    )
 
 
 def test_llm_enabled_parse_does_not_fallback_to_local_parser(

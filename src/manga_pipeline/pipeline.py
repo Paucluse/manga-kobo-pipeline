@@ -1487,6 +1487,7 @@ def _step_normalize_and_archive(
                 record_id=record_id,
                 record=record,
                 cfg=cfg,
+                db=db,
                 source_path=file_path,
                 clean_name=clean_name,
                 target_archive=target_archive,
@@ -1540,14 +1541,16 @@ def _prepare_existing_volume_replacement(
     record_id: int,
     record: MangaRecord,
     cfg: PipelineConfig,
+    db: Database,
     source_path: Path,
     clean_name: str,
     target_archive: Path,
 ) -> None:
     """Move generated files aside when a larger source replaces an old volume."""
-    source_size = source_path.stat().st_size
+    source_size = _source_payload_size(source_path)
     archive_size = target_archive.stat().st_size
-    if source_size <= archive_size:
+    imported_owner = _find_imported_owner_for_archive(db, cfg, target_archive)
+    if imported_owner and source_size <= archive_size:
         raise FileExistsError(
             f"Archive target already exists and source is not larger: {target_archive}"
         )
@@ -1559,15 +1562,51 @@ def _prepare_existing_volume_replacement(
             moved.append(_move_replacement_artifact(artifact, backup_dir, cfg))
 
     logger.info(
-        "[ID:%s] Preparing larger replacement for %s "
+        "[ID:%s] Preparing %s for %s "
         "(source=%d bytes, existing_archive=%d bytes, moved=%d, backup=%s)",
         record_id,
+        "larger replacement" if imported_owner else "stale archive cleanup",
         clean_name,
         source_size,
         archive_size,
         len(moved),
         backup_dir,
     )
+
+
+def _source_payload_size(source_path: Path) -> int:
+    if source_path.is_dir():
+        return sum(path.stat().st_size for path in source_path.rglob("*") if path.is_file())
+    return source_path.stat().st_size
+
+
+def _find_imported_owner_for_archive(
+    db: Database,
+    cfg: PipelineConfig,
+    target_archive: Path,
+) -> MangaRecord | None:
+    for existing in db.get_all_records():
+        if existing.current_status != ProcessingStatus.DONE:
+            continue
+        if existing.archive_path and Path(existing.archive_path) == target_archive:
+            return existing
+        if not existing.converted_path:
+            continue
+        converted_path = Path(existing.converted_path)
+        series_name, _series_dir, dest_path = _expected_import_destination(
+            existing,
+            cfg,
+            converted_path,
+        )
+        if dest_path.is_file() and target_archive.name == f"{_build_clean_name(existing)}.cbz":
+            logger.debug(
+                "Found imported owner for %s via Komga destination %s (series=%s)",
+                target_archive,
+                dest_path,
+                series_name,
+            )
+            return existing
+    return None
 
 
 def _replacement_backup_dir(

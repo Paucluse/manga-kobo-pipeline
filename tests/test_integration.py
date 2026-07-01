@@ -70,6 +70,86 @@ class TestNormalizeCbz:
         with pytest.raises(ValueError, match="Unsupported"):
             normalize_to_cbz(src, tmp_path / "out")
 
+    def test_rar_prefers_unar_extraction(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RAR files should use unar when available before rarfile fallback."""
+        src = tmp_path / "input" / "manga.rar"
+        src.parent.mkdir()
+        src.write_bytes(b"fake rar")
+        commands: list[list[str]] = []
+
+        def fake_which(command: str) -> str | None:
+            return f"/usr/bin/{command}" if command == "unar" else None
+
+        def fake_run(
+            command: list[str],
+            capture_output: bool,
+            text: bool,
+            check: bool,
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            out_dir = Path(command[command.index("-output-directory") + 1])
+            extracted = out_dir / "series" / "page01.jpg"
+            extracted.parent.mkdir()
+            extracted.write_bytes(b"page")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("manga_pipeline.normalizer.shutil.which", fake_which)
+        monkeypatch.setattr("manga_pipeline.normalizer.subprocess.run", fake_run)
+
+        result = normalize_to_cbz(src, tmp_path / "archive")
+
+        assert result.name == "manga.cbz"
+        assert commands[0][0] == "unar"
+        with zipfile.ZipFile(result) as zf:
+            assert zf.namelist() == ["series/page01.jpg"]
+            assert zf.read("series/page01.jpg") == b"page"
+
+    def test_rar_bad_archive_raises_value_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """rarfile-specific failures should not escape as unexpected errors."""
+        rarfile = pytest.importorskip("rarfile")
+        src = tmp_path / "manga.rar"
+        src.write_bytes(b"fake rar")
+
+        class FakeRarFile:
+            def __init__(self, path: str) -> None:
+                self.path = path
+
+            def __enter__(self) -> "FakeRarFile":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def infolist(self) -> list[object]:
+                class Entry:
+                    filename = "page01.jpg"
+
+                    @staticmethod
+                    def is_dir() -> bool:
+                        return False
+
+                return [Entry()]
+
+            def read(self, filename: str) -> bytes:
+                raise rarfile.BadRarFile("Failed the read enough data: req=1 got=0")
+
+        monkeypatch.setattr("manga_pipeline.normalizer.shutil.which", lambda _cmd: None)
+        monkeypatch.setattr("rarfile.RarFile", FakeRarFile)
+
+        out_dir = tmp_path / "archive"
+        with pytest.raises(ValueError, match="RAR extraction failed"):
+            normalize_to_cbz(src, out_dir)
+
+        assert not (out_dir / "manga.cbz").exists()
+
     def test_extract_pdf_images_to_cbz(
         self,
         tmp_path: Path,
